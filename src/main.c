@@ -254,936 +254,696 @@ static uint16_t pop16(avr_t *c)
 /*--------------------------------------------------------------------
   The big single-step decoder / executor
  --------------------------------------------------------------------*/
+
+#define TRACE(...) do { if (g_trace) printf(__VA_ARGS__); } while (0)
+
+
 static void avr_step(avr_t *c)
 {
-    uint32_t cur_pc = c->pc;
-    uint16_t op = flash_word(c, cur_pc);
-    c->pc += 2;
-     
-    if (g_trace)
-        printf("PC = %06lX, instr = %04X\n", (unsigned long)cur_pc, op);
+    uint32_t cur_pc = c->pc;          /* PC antes de buscar a instrução      */
+    uint16_t op     = flash_word(c, cur_pc);
+    c->pc          += 2;              /* PC aponta para a próxima palavra    */
 
+/* ==================== ARITHMETIC INSTRUCTIONS ==================== */
 
-    if (op == 0x0000)
-    {
+    /* ADD  – 0000 11rd dddd rrrr (mask 0xFC00 == 0x0C00) */
+    if ((op & 0xFC00) == 0x0C00) {
+        uint8_t d  = (op >> 4) & 0x1F;
+        uint8_t r  = ((op & 0x200) >> 5) | (op & 0x0F);
+        uint8_t a  = c->R[d];
+        uint8_t b  = c->R[r];
+        uint16_t s = a + b;
+        c->R[d]    = (uint8_t)s;
+        flags_add(c, a, b, s, 0);
         c->cycles += 1;
+        TRACE("PC=%06lX  %04X  ADD  R%u,R%u   -> R%u=0x%02X\n",
+              (unsigned long)cur_pc, op, d, r, d, c->R[d]);
     }
 
-    else if ((op & 0xFF00) == 0x9600) /* Added per Section 6: ADIW – Add Immediate to Word */
-    {
-        /* Rd pair ∈ {24,26,28,30}, immediate K ∈ [0..63] */
-        int dd = (op >> 4) & 0x03; /* 0→R24,1→R26,2→R28,3→R30 */
-        int d = 24 + dd;
-        uint8_t K = ((op >> 2) & 0x30) | (op & 0x0F);
-
-        /* form 16‐bit value R[d+1]:R[d] */
-        uint16_t a = (uint16_t)c->R[d] | ((uint16_t)c->R[d + 1] << 8);
-        uint32_t r = (uint32_t)a + K;
-
-        c->R[d] = (uint8_t)r;
-        c->R[d + 1] = (uint8_t)(r >> 8);
-
-        /* Flags: Z, N, V, S, C (H unaffected) */
-        if ((r & 0xFFFF) == 0)
-            SETBIT(c->sreg, F_Z);
-        else
-            CLRBIT(c->sreg, F_Z);
-        if (r & 0x8000)
-            SETBIT(c->sreg, F_N);
-        else
-            CLRBIT(c->sreg, F_N);
-        /* Two's‐compl overflow for 16‐bit add: (~(A ^ K) & (A ^ R)) & 0x8000 */
-        if ((~(a ^ K) & (a ^ r) & 0x8000) != 0)
-            SETBIT(c->sreg, F_V);
-        else
-            CLRBIT(c->sreg, F_V);
-        if (GETBIT(c->sreg, F_N) ^ GETBIT(c->sreg, F_V))
-            SETBIT(c->sreg, F_S);
-        else
-            CLRBIT(c->sreg, F_S);
-        if (r & 0x10000)
-            SETBIT(c->sreg, F_C);
-        else
-            CLRBIT(c->sreg, F_C);
-
-        c->cycles += 2;
-    }
-    else if ((op & 0xFF00) == 0x9700) /* Added per Section 6: SBIW – Subtract Immediate from Word */
-    {
-        int dd = (op >> 4) & 0x03;
-        int d = 24 + dd;
-        uint8_t K = ((op >> 2) & 0x30) | (op & 0x0F);
-
-        uint16_t a = (uint16_t)c->R[d] | ((uint16_t)c->R[d + 1] << 8);
-        uint32_t r = (uint32_t)a - K;
-
-        c->R[d] = (uint8_t)r;
-        c->R[d + 1] = (uint8_t)(r >> 8);
-
-        /* Flags: Z, N, V, S, C (H unaffected) */
-        if ((r & 0xFFFF) == 0)
-            SETBIT(c->sreg, F_Z);
-        else
-            CLRBIT(c->sreg, F_Z);
-        if (r & 0x8000)
-            SETBIT(c->sreg, F_N);
-        else
-            CLRBIT(c->sreg, F_N);
-        /* Overflow: (A ^ K) & (A ^ R) & 0x8000 */
-        if (((a ^ K) & (a ^ r) & 0x8000) != 0)
-            SETBIT(c->sreg, F_V);
-        else
-            CLRBIT(c->sreg, F_V);
-        if (GETBIT(c->sreg, F_N) ^ GETBIT(c->sreg, F_V))
-            SETBIT(c->sreg, F_S);
-        else
-            CLRBIT(c->sreg, F_S);
-        /* Borrow out of MSB => carry flag */
-        if (r & 0x10000)
-            SETBIT(c->sreg, F_C);
-        else
-            CLRBIT(c->sreg, F_C);
-
-        c->cycles += 2;
-    }
-    else if ((op & 0xF000) == 0x5000) /* Added per Section 6: SUBI – Subtract Immediate */
-    {
-        int d = 16 + ((op >> 4) & 0x0F);
-        uint8_t K = ((op >> 4) & 0xF0) | (op & 0x0F);
-        uint8_t a = c->R[d];
-        uint16_t r = (uint16_t)a - (uint16_t)K;
-        c->R[d] = (uint8_t)r;
-        flags_sub(c, a, K, r, 0);
+    /* ADC  – 0001 11rd dddd rrrr (mask 0xFC00 == 0x1C00) */
+    else if ((op & 0xFC00) == 0x1C00) {
+        uint8_t d  = (op >> 4) & 0x1F;
+        uint8_t r  = ((op & 0x200) >> 5) | (op & 0x0F);
+        uint8_t a  = c->R[d];
+        uint8_t b  = c->R[r];
+        uint8_t c_in = GETBIT(c->sreg, F_C);
+        uint16_t s = a + b + c_in;
+        c->R[d]    = (uint8_t)s;
+        flags_add(c, a, b, s, c_in);
         c->cycles += 1;
-    }
-    else if ((op & 0xF000) == 0x4000) /* Added per Section 6: SBCI – Subtract Immediate with Carry */
-    {
-        int d = 16 + ((op >> 4) & 0x0F);
-        uint8_t K = ((op >> 4) & 0xF0) | (op & 0x0F);
-        uint8_t a = c->R[d];
-        uint8_t cin = GETBIT(c->sreg, F_C);
-        uint16_t r = (uint16_t)a - (uint16_t)K - cin;
-        c->R[d] = (uint8_t)r;
-        flags_sub(c, a, K, r, cin);
-        c->cycles += 1;
+        TRACE("PC=%06lX  %04X  ADC  R%u,R%u +C=%u -> R%u=0x%02X\n",
+              (unsigned long)cur_pc, op, d, r, c_in, d, c->R[d]);
     }
 
-    /* ------------------- Logical instructions ------------------- */
-    else if ((op & 0xFC00) == 0x2000) /* Added per Section 6: AND – Logical AND */
-    {
-        uint8_t d = (op >> 4) & 0x1F, r = ((op & 0x200) >> 5) | (op & 0x0F);
+    /* SUB  – 0001 10rd dddd rrrr (mask 0xFC00 == 0x1800) */
+    else if ((op & 0xFC00) == 0x1800) {
+        uint8_t d  = (op >> 4) & 0x1F;
+        uint8_t r  = ((op & 0x200) >> 5) | (op & 0x0F);
+        uint8_t a  = c->R[d];
+        uint8_t b  = c->R[r];
+        uint16_t s = (uint16_t)a - (uint16_t)b;
+        c->R[d]    = (uint8_t)s;
+        flags_sub(c, a, b, s, 0);
+        c->cycles += 1;
+        TRACE("PC=%06lX  %04X  SUB  R%u,R%u   -> R%u=0x%02X\n",
+              (unsigned long)cur_pc, op, d, r, d, c->R[d]);
+    }
+
+    /* SBC  – 0000 10rd dddd rrrr (mask 0xFC00 == 0x0800) */
+    else if ((op & 0xFC00) == 0x0800) {
+        uint8_t d   = (op >> 4) & 0x1F;
+        uint8_t r   = ((op & 0x200) >> 5) | (op & 0x0F);
+        uint8_t a   = c->R[d];
+        uint8_t b   = c->R[r];
+        uint8_t c_in= GETBIT(c->sreg, F_C);
+        uint16_t s  = (uint16_t)a - (uint16_t)b - c_in;
+        c->R[d]     = (uint8_t)s;
+        flags_sub(c, a, b, s, c_in);
+        c->cycles  += 1;
+        TRACE("PC=%06lX  %04X  SBC  R%u,R%u -C=%u -> R%u=0x%02X\n",
+              (unsigned long)cur_pc, op, d, r, c_in, d, c->R[d]);
+    }
+
+    /* INC  – 1001 010d dddd 0011 (mask 0xFE0F == 0x9403) */
+    else if ((op & 0xFE0F) == 0x9403) {
+        uint8_t d   = (op >> 4) & 0x1F;
+        uint8_t res = c->R[d] + 1;
+        c->R[d]     = res;
+        if (res == 0) SETBIT(c->sreg,F_Z); else CLRBIT(c->sreg,F_Z);
+        if (res & 0x80) SETBIT(c->sreg,F_N); else CLRBIT(c->sreg,F_N);
+        if (res == 0x80) SETBIT(c->sreg,F_V); else CLRBIT(c->sreg,F_V);
+        if (GETBIT(c->sreg,F_N)^GETBIT(c->sreg,F_V))
+            SETBIT(c->sreg,F_S); else CLRBIT(c->sreg,F_S);
+        c->cycles += 1;
+        TRACE("PC=%06lX  %04X  INC  R%u        -> 0x%02X\n",
+              (unsigned long)cur_pc, op, d, res);
+    }
+
+    /* DEC  – 1001 010d dddd 1010 (mask 0xFE0F == 0x940A) */
+    else if ((op & 0xFE0F) == 0x940A) {
+        uint8_t d   = (op >> 4) & 0x1F;
+        uint8_t res = c->R[d] - 1;
+        c->R[d]     = res;
+        if (res == 0) SETBIT(c->sreg,F_Z); else CLRBIT(c->sreg,F_Z);
+        if (res & 0x80) SETBIT(c->sreg,F_N); else CLRBIT(c->sreg,F_N);
+        if (res == 0x7F) SETBIT(c->sreg,F_V); else CLRBIT(c->sreg,F_V);
+        if (GETBIT(c->sreg,F_N)^GETBIT(c->sreg,F_V))
+            SETBIT(c->sreg,F_S); else CLRBIT(c->sreg,F_S);
+        c->cycles += 1;
+        TRACE("PC=%06lX  %04X  DEC  R%u        -> 0x%02X\n",
+              (unsigned long)cur_pc, op, d, res);
+    }
+
+    /* NEG  – 1001 010d dddd 0001 (mask 0xFE0F == 0x9401) */
+    else if ((op & 0xFE0F) == 0x9401) {
+        uint8_t d   = (op >> 4) & 0x1F;
+        uint8_t a   = c->R[d];
+        uint8_t res = -a;
+        c->R[d]     = res;
+        if (res == 0) SETBIT(c->sreg,F_Z); else CLRBIT(c->sreg,F_Z);
+        if (res & 0x80) SETBIT(c->sreg,F_N); else CLRBIT(c->sreg,F_N);
+        if (res == 0x80) SETBIT(c->sreg,F_V); else CLRBIT(c->sreg,F_V);
+        if (GETBIT(c->sreg,F_N)^GETBIT(c->sreg,F_V))
+            SETBIT(c->sreg,F_S); else CLRBIT(c->sreg,F_S);
+        if (a || res) SETBIT(c->sreg,F_C); else CLRBIT(c->sreg,F_C);
+        if (a && res) SETBIT(c->sreg,F_H); else CLRBIT(c->sreg,F_H);
+        c->cycles += 1;
+        TRACE("PC=%06lX  %04X  NEG  R%u        -> 0x%02X\n",
+              (unsigned long)cur_pc, op, d, res);
+    }
+
+    /* COM  – 1001 010d dddd 0000 (mask 0xFE0F == 0x9400) */
+    else if ((op & 0xFE0F) == 0x9400) {
+        uint8_t d   = (op >> 4) & 0x1F;
+        uint8_t res = ~c->R[d];
+        c->R[d]     = res;
+        SETBIT(c->sreg, F_C);
+        flags_logic(c, res);
+        c->cycles += 1;
+        TRACE("PC=%06lX  %04X  COM  R%u        -> 0x%02X\n",
+              (unsigned long)cur_pc, op, d, res);
+    }
+
+    /* SER  – 1110 1111 dddd 1111 (mask 0xF0F0 == 0xEF0F) */
+    else if ((op & 0xF0F0) == 0xEF0F) {
+        uint8_t d = 16 + ((op >> 4) & 0x0F);
+        c->R[d]   = 0xFF;
+        c->cycles += 1;
+        TRACE("PC=%06lX  %04X  SER  R%u\n",
+              (unsigned long)cur_pc, op, d);
+    }
+
+/* ==================== LOGIC AND BIT OPERATIONS ==================== */
+
+    /* AND  – 0010 00rd dddd rrrr (mask 0xFC00 == 0x2000) */
+    else if ((op & 0xFC00) == 0x2000) {
+        uint8_t d = (op >> 4) & 0x1F;
+        uint8_t r = ((op & 0x200) >> 5) | (op & 0x0F);
         uint8_t res = c->R[d] & c->R[r];
         c->R[d] = res;
         flags_logic(c, res);
         c->cycles += 1;
+        TRACE("PC=%06lX  %04X  AND  R%u,R%u -> R%u=0x%02X\n",
+              (unsigned long)cur_pc, op, d, r, d, res);
     }
-    else if ((op & 0xFC00) == 0x2400) /* Added per Section 6: EOR – Exclusive OR */
-    {
-        uint8_t d = (op >> 4) & 0x1F, r = ((op & 0x200) >> 5) | (op & 0x0F);
-        uint8_t res = c->R[d] ^ c->R[r];
-        c->R[d] = res;
-        flags_logic(c, res);
-        c->cycles += 1;
-    }
-    else if ((op & 0xFC00) == 0x2800) /* Added per Section 6: OR – Logical OR */
-    {
-        uint8_t d = (op >> 4) & 0x1F, r = ((op & 0x200) >> 5) | (op & 0x0F);
+
+    /* OR   – 0010 10rd dddd rrrr (mask 0xFC00 == 0x2800) */
+    else if ((op & 0xFC00) == 0x2800) {
+        uint8_t d = (op >> 4) & 0x1F;
+        uint8_t r = ((op & 0x200) >> 5) | (op & 0x0F);
         uint8_t res = c->R[d] | c->R[r];
         c->R[d] = res;
         flags_logic(c, res);
         c->cycles += 1;
+        TRACE("PC=%06lX  %04X  OR   R%u,R%u -> R%u=0x%02X\n",
+              (unsigned long)cur_pc, op, d, r, d, res);
     }
-    else if ((op & 0xFC00) == 0x2C00) /* Added per Section 6: MOV – Copy Register */
-    {
-        uint8_t d = (op >> 4) & 0x1F, r = ((op & 0x200) >> 5) | (op & 0x0F);
-        c->R[d] = c->R[r];
+
+    /* EOR  – 0010 01rd dddd rrrr (mask 0xFC00 == 0x2400) */
+    else if ((op & 0xFC00) == 0x2400) {
+        uint8_t d = (op >> 4) & 0x1F;
+        uint8_t r = ((op & 0x200) >> 5) | (op & 0x0F);
+        uint8_t res = c->R[d] ^ c->R[r];
+        c->R[d] = res;
+        flags_logic(c, res);
         c->cycles += 1;
+        TRACE("PC=%06lX  %04X  EOR  R%u,R%u -> R%u=0x%02X\n",
+              (unsigned long)cur_pc, op, d, r, d, res);
     }
-    else if ((op & 0xF000) == 0x3000) /* Added per Section 6: CPI – Compare with Immediate */
-    {
-        int d = 16 + ((op >> 4) & 0x0F);
+
+    /* ANDI – 0111 KKKK dddd KKKK (mask 0xF000 == 0x7000) */
+    else if ((op & 0xF000) == 0x7000) {      /* Também CBR (usamos duas vezes) */
+        uint8_t d = 16 + ((op >> 4) & 0x0F);
+        uint8_t K = ((op >> 4) & 0xF0) | (op & 0x0F);
+        uint8_t res = c->R[d] & K;
+        c->R[d] = res;
+        flags_logic(c, res);
+        c->cycles += 1;
+        TRACE("PC=%06lX  %04X  ANDI R%u,0x%02X -> 0x%02X\n",
+              (unsigned long)cur_pc, op, d, K, res);
+    }
+
+    /* ORI/SBR – 0110 KKKK dddd KKKK (mask 0xF000 == 0x6000) */
+    else if ((op & 0xF000) == 0x6000) {
+        uint8_t d = 16 + ((op >> 4) & 0x0F);
+        uint8_t K = ((op >> 4) & 0xF0) | (op & 0x0F);
+        uint8_t res = c->R[d] | K;
+        c->R[d] = res;
+        flags_logic(c, res);
+        c->cycles += 1;
+        TRACE("PC=%06lX  %04X  ORI  R%u,0x%02X -> 0x%02X\n",
+              (unsigned long)cur_pc, op, d, K, res);
+    }
+
+    /* CPI – 0011 KKKK dddd KKKK (mask 0xF000 == 0x3000) */
+    else if ((op & 0xF000) == 0x3000) {
+        uint8_t d = 16 + ((op >> 4) & 0x0F);
         uint8_t K = ((op >> 4) & 0xF0) | (op & 0x0F);
         uint8_t a = c->R[d];
-        uint16_t r = (uint16_t)a - (uint16_t)K;
-        flags_sub(c, a, K, r, 0);
+        uint16_t res = (uint16_t)a - (uint16_t)K;
+        flags_sub(c, a, K, res, 0);
         c->cycles += 1;
-    }
-    else if ((op & 0xFC00) == 0x1400) /* Added per Section 6: CP – Compare */
-    {
-        uint8_t d = (op >> 4) & 0x1F, r = ((op & 0x200) >> 5) | (op & 0x0F);
-        uint8_t a = c->R[d], b = c->R[r];
-        uint16_t res = (uint16_t)a - (uint16_t)b;
-        flags_sub(c, a, b, res, 0);
-        c->cycles += 1;
-    }
-    else if ((op & 0xFC00) == 0x0400) /* Added per Section 6: CPC – Compare with Carry */
-    {
-        uint8_t d = (op >> 4) & 0x1F, r = ((op & 0x200) >> 5) | (op & 0x0F);
-        uint8_t a = c->R[d], b = c->R[r], cin = GETBIT(c->sreg, F_C);
-        uint16_t res = (uint16_t)a - (uint16_t)b - cin;
-        flags_sub(c, a, b, res, cin);
-        c->cycles += 1;
+        TRACE("PC=%06lX  %04X  CPI  R%u,0x%02X (flags only)\n",
+              (unsigned long)cur_pc, op, d, K);
     }
 
-    /* ----------------------- Shifts & Rotates ----------------------- */
-    else if ((op & 0xFC00) == 0x0C00) /* ADD / LSL pair—detect LSL when Rd==Rr */
-    {
-        uint8_t d = (op >> 4) & 0x1F, r = ((op & 0x200) >> 5) | (op & 0x0F);
-        if (r == d) /* Added per Section 6: LSL – Logical Shift Left */
-        {
-            uint8_t old = c->R[d], res = old << 1;
-            c->R[d] = res;
-            flags_logic(c, res); /* sets Z,N,V,S */
-            if (old & 0x80)
-                SETBIT(c->sreg, F_C);
-            else
-                CLRBIT(c->sreg, F_C);
-            c->cycles += 1;
-        }
-        else /* fallback to normal ADD (already implemented above) */
-        {
-            uint8_t a = c->R[d], b = c->R[r];
-            uint16_t sum = a + b;
-            c->R[d] = (uint8_t)sum;
-            flags_add(c, a, b, sum, 0);
-            c->cycles += 1;
-        }
-    }
-    else if ((op & 0xFE0F) == 0x9406) /* Added per Section 6: LSR – Logical Shift Right */
-    {
-        uint8_t d = (op >> 4) & 0x1F;
-        uint8_t old = c->R[d], res = old >> 1;
+    /* CBR – 0111 KKKK dddd KKKK (mesmo opcode da ANDI, K complementado) */
+    else if ((op & 0xF000) == 0x7000 && (op & 0x0F) != 0x0F) { /* distingue do ANDI “puro” */
+        uint8_t d = 16 + ((op >> 4) & 0x0F);
+        uint8_t K = ~(((op >> 4) & 0xF0) | (op & 0x0F));
+        uint8_t res = c->R[d] & K;
         c->R[d] = res;
-        CLRBIT(c->sreg, F_N); /* N ← 0 */
-        if (res)
-            CLRBIT(c->sreg, F_Z);
-        else
-            SETBIT(c->sreg, F_Z);
-        CLRBIT(c->sreg, F_V); /* V ← N ^ C, with N=0 => V=C */
-        if (GETBIT(c->sreg, F_N) ^ GETBIT(c->sreg, F_C))
-            SETBIT(c->sreg, F_S);
-        else
-            CLRBIT(c->sreg, F_S);
-        if (old & 0x01)
-            SETBIT(c->sreg, F_C);
-        else
-            CLRBIT(c->sreg, F_C);
+        flags_logic(c, res);
         c->cycles += 1;
-    }
-    else if ((op & 0xFE0F) == 0x9405) /* Added per Section 6: ASR – Arithmetic Shift Right */
-    {
-        uint8_t d = (op >> 4) & 0x1F;
-        uint8_t old = c->R[d], msb = old & 0x80;
-        uint8_t res = (old >> 1) | msb;
-        c->R[d] = res;
-        if (res)
-            CLRBIT(c->sreg, F_Z);
-        else
-            SETBIT(c->sreg, F_Z);
-        if (res & 0x80)
-            SETBIT(c->sreg, F_N);
-        else
-            CLRBIT(c->sreg, F_N);
-        CLRBIT(c->sreg, F_V); /* V ← N ^ C */
-        if (GETBIT(c->sreg, F_N) ^ GETBIT(c->sreg, F_C))
-            SETBIT(c->sreg, F_S);
-        else
-            CLRBIT(c->sreg, F_S);
-        if (old & 0x01)
-            SETBIT(c->sreg, F_C);
-        else
-            CLRBIT(c->sreg, F_C);
-        c->cycles += 1;
-    }
-    else if ((op & 0xFE0F) == 0x9407) /* Added per Section 6: ROR – Rotate Right through Carry */
-    {
-        uint8_t d = (op >> 4) & 0x1F;
-        uint8_t old = c->R[d];
-        uint8_t cin = GETBIT(c->sreg, F_C);
-        uint8_t res = (old >> 1) | (cin << 7);
-        c->R[d] = res;
-        CLRBIT(c->sreg, F_N); /* N ← 0 */
-        if (res)
-            CLRBIT(c->sreg, F_Z);
-        else
-            SETBIT(c->sreg, F_Z);
-        CLRBIT(c->sreg, F_V); /* V ← N ^ C */
-        if (GETBIT(c->sreg, F_N) ^ GETBIT(c->sreg, F_C))
-            SETBIT(c->sreg, F_S);
-        else
-            CLRBIT(c->sreg, F_S);
-        if (old & 0x01)
-            SETBIT(c->sreg, F_C);
-        else
-            CLRBIT(c->sreg, F_C);
-        c->cycles += 1;
-    }
-    else if ((op & 0xFC00) == 0x1C00) /* ADC / ROL pair—detect ROL when Rd==Rr */
-    {
-        uint8_t d = (op >> 4) & 0x1F, r = ((op & 0x200) >> 5) | (op & 0x0F);
-        if (r == d) /* Added per Section 6: ROL – Rotate Left through Carry */
-        {
-            uint8_t old = c->R[d];
-            uint8_t cin = GETBIT(c->sreg, F_C);
-            uint8_t res = (old << 1) | cin;
-            c->R[d] = res;
-            if (res)
-                CLRBIT(c->sreg, F_Z);
-            else
-                SETBIT(c->sreg, F_Z);
-            if (res & 0x80)
-                SETBIT(c->sreg, F_N);
-            else
-                CLRBIT(c->sreg, F_N);
-            CLRBIT(c->sreg, F_V); /* V ← N ^ C (after roll) */
-            if (GETBIT(c->sreg, F_N) ^ GETBIT(c->sreg, F_C))
-                SETBIT(c->sreg, F_S);
-            else
-                CLRBIT(c->sreg, F_S);
-            if (old & 0x80)
-                SETBIT(c->sreg, F_C);
-            else
-                CLRBIT(c->sreg, F_C);
-            c->cycles += 1;
-        }
-        else /* normal ADC already handled above */
-        {
-            uint8_t a = c->R[d], b = c->R[r], cin = GETBIT(c->sreg, F_C);
-            uint16_t sum = a + b + cin;
-            c->R[d] = (uint8_t)sum;
-            flags_add(c, a, b, sum, cin);
-            c->cycles += 1;
-        }
+        TRACE("PC=%06lX  %04X  CBR  R%u,&=~0x%02X -> 0x%02X\n",
+              (unsigned long)cur_pc, op, d, ~K & 0xFF, res);
     }
 
-    /* ------------------- Integer Multiply Instructions ------------------- */
-    else if ((op & 0xFC00) == 0x9C00) /* Added per Section 6: MUL – Multiply Unsigned */
-    {
-        uint8_t d = (op >> 4) & 0x1F, r = ((op & 0x200) >> 5) | (op & 0x0F);
-        uint16_t prod = (uint16_t)c->R[d] * (uint16_t)c->R[r];
-        c->R[0] = prod & 0xFF;
-        c->R[1] = prod >> 8;
-        CLRBIT(c->sreg, F_N);
-        if (prod == 0)
-            SETBIT(c->sreg, F_Z);
-        else
-            CLRBIT(c->sreg, F_Z);
-        /* V unaffected for MUL family */
-        if (prod & 0x8000)
-            SETBIT(c->sreg, F_C);
-        else
-            CLRBIT(c->sreg, F_C);
-        c->cycles += 2;
-    }
-    else if ((op & 0xFF08) == 0x0208) /* Added per Section 6: MULS – Multiply Signed */
-    {
-        uint8_t d = (op >> 4) & 0x1F, r = (op & 0xF) | ((op >> 5) & 0x10);
-        int16_t a = (int8_t)c->R[d], b = (int8_t)c->R[r];
-        int16_t prod = a * b;
-        uint16_t u = (uint16_t)prod;
-        c->R[0] = (uint8_t)u;
-        c->R[1] = (uint8_t)(u >> 8);
-        CLRBIT(c->sreg, F_N);
-        if (u == 0)
-            SETBIT(c->sreg, F_Z);
-        else
-            CLRBIT(c->sreg, F_Z);
-        if (u & 0x8000)
-            SETBIT(c->sreg, F_C);
-        else
-            CLRBIT(c->sreg, F_C);
-        c->cycles += 2;
-    }
-    else if ((op & 0xFE08) == 0x0208) /* Added per Section 6: MULSU – Multiply Signed with Unsigned */
-    {
-        uint8_t d = (op >> 4) & 0x1F, r = (op & 0xF) | ((op >> 5) & 0x10);
-        int16_t a = (int8_t)c->R[d];
-        uint16_t b = c->R[r];
-        int16_t prod = a * (int16_t)b;
-        uint16_t u = (uint16_t)prod;
-        c->R[0] = (uint8_t)u;
-        c->R[1] = (uint8_t)(u >> 8);
-        CLRBIT(c->sreg, F_N);
-        if (u == 0)
-            SETBIT(c->sreg, F_Z);
-        else
-            CLRBIT(c->sreg, F_Z);
-        if (u & 0x8000)
-            SETBIT(c->sreg, F_C);
-        else
-            CLRBIT(c->sreg, F_C);
-        c->cycles += 2;
-    }
-
-    /* ------------------- Bit‐manipulation instructions ------------------- */
-
-    /* CBI – Clear Bit in I/O Register */
-    else if ((op & 0xFF00) == 0x9800) /* Added per Section 6: CBI */
-    {
-        uint8_t A = (op >> 3) & 0x1F, b = op & 0x07;
-        uint32_t addr = 0x20 + A; /* I/O space starts at data addr 0x20 */
-        uint8_t v = read_data(c, addr) & ~(1u << b);
-        write_data(c, addr, v);
-        c->cycles += 2;
-    }
-
-    /* SBI – Set Bit in I/O Register */
-    else if ((op & 0xFF00) == 0x9A00) /* Added per Section 6: SBI */
-    {
-        uint8_t A = (op >> 3) & 0x1F, b = op & 0x07;
-        uint32_t addr = 0x20 + A;
-        uint8_t v = read_data(c, addr) | (1u << b);
-        write_data(c, addr, v);
-        c->cycles += 2;
-    }
-
-    /* SBIC – Skip if Bit in I/O Register is Cleared */
-    else if ((op & 0xFF00) == 0x9900) /* Added per Section 6: SBIC */
-    {
-        uint8_t A = (op >> 3) & 0x1F, b = op & 0x07;
-        uint32_t addr = 0x20 + A;
-        uint8_t v = read_data(c, addr);
-        if (!(v & (1u << b)))
-        {
-            c->pc += 2; /* skip next word */
-            c->cycles += 2;
-        }
-        else
-        {
-            c->cycles += 1;
-        }
-    }
-
-    /* SBIS – Skip if Bit in I/O Register is Set */
-    else if ((op & 0xFF00) == 0x9B00) /* Added per Section 6: SBIS */
-    {
-        uint8_t A = (op >> 3) & 0x1F, b = op & 0x07;
-        uint32_t addr = 0x20 + A;
-        uint8_t v = read_data(c, addr);
-        if (v & (1u << b))
-        {
-            c->pc += 2;
-            c->cycles += 2;
-        }
-        else
-        {
-            c->cycles += 1;
-        }
-    }
-
-    /* SBRC – Skip if Bit in Register is Cleared */
-    else if ((op & 0xFE08) == 0xFC00) /* Added per Section 6: SBRC */
-    {
-        uint8_t r = ((op & 0x0200) >> 5) | (op & 0x0F);
+    /* SBI – 1001 1010 AAAA Abbb (mask 0xFF00 == 0x9A00) */
+    else if ((op & 0xFF00) == 0x9A00) {
+        uint8_t A = (op >> 3) & 0x1F;
         uint8_t b = op & 0x07;
-        uint8_t v = c->R[r];
-        if (!(v & (1u << b)))
-        {
-            c->pc += 2;
-            c->cycles += 2;
-        }
-        else
-        {
-            c->cycles += 1;
-        }
+        uint8_t val = read_data(c, 0x20 + A);
+        write_data(c, 0x20 + A, val | (1 << b));
+        c->cycles += 2;
+        TRACE("PC=%06lX  %04X  SBI  0x%02X,%u\n",
+              (unsigned long)cur_pc, op, 0x20 + A, b);
     }
 
-    /* SBRS – Skip if Bit in Register is Set */
-    else if ((op & 0xFE08) == 0xFE00) /* Added per Section 6: SBRS */
-    {
-        uint8_t r = ((op & 0x0200) >> 5) | (op & 0x0F);
+    /* CBI – 1001 1000 AAAA Abbb (mask 0xFF00 == 0x9800) */
+    else if ((op & 0xFF00) == 0x9800) {
+        uint8_t A = (op >> 3) & 0x1F;
         uint8_t b = op & 0x07;
-        uint8_t v = c->R[r];
-        if (v & (1u << b))
-        {
-            c->pc += 2;
-            c->cycles += 2;
-        }
-        else
-        {
-            c->cycles += 1;
-        }
+        uint8_t val = read_data(c, 0x20 + A);
+        write_data(c, 0x20 + A, val & ~(1 << b));
+        c->cycles += 2;
+        TRACE("PC=%06lX  %04X  CBI  0x%02X,%u\n",
+              (unsigned long)cur_pc, op, 0x20 + A, b);
     }
 
-    /* BLD – Bit Load from T to Register */
-    else if ((op & 0xFE08) == 0xF800) /* Added per Section 6: BLD */
-    {
-        uint8_t d = (op >> 4) & 0x1F, b = op & 0x07;
-        if (GETBIT(c->sreg, F_T))
-            c->R[d] |= (1u << b);
-        else
-            c->R[d] &= ~(1u << b);
-        c->cycles += 1;
-    }
-
-    /* BST – Bit Store from Register to T */
-    else if ((op & 0xFE08) == 0xFA00) /* Added per Section 6: BST */
-    {
-        uint8_t d = (op >> 4) & 0x1F, b = op & 0x07;
-        if (c->R[d] & (1u << b))
+    /* BST – 1111 101d dddd 0bbb (mask 0xFE08 == 0xFA00) */
+    else if ((op & 0xFE08) == 0xFA00) {
+        uint8_t d = (op >> 4) & 0x1F;
+        uint8_t b = op & 0x07;
+        if (c->R[d] & (1 << b))
             SETBIT(c->sreg, F_T);
         else
             CLRBIT(c->sreg, F_T);
         c->cycles += 1;
+        TRACE("PC=%06lX  %04X  BST  R%u,%u -> T=%u\n",
+              (unsigned long)cur_pc, op, d, b, GETBIT(c->sreg, F_T));
     }
 
-    /* BSET – Set Flag in SREG */
-   else if ((op & 0xFF8F) == 0x9408) /* Added per Section 6: BSET */
-    {
-        uint8_t s = (op >> 4) & 0x07;
-        SETBIT(c->sreg, s);
+    /* BLD – 1111 100d dddd 0bbb (mask 0xFE08 == 0xF800) */
+    else if ((op & 0xFE08) == 0xF800) {
+        uint8_t d = (op >> 4) & 0x1F;
+        uint8_t b = op & 0x07;
+        if (GETBIT(c->sreg, F_T))
+            c->R[d] |= (1 << b);
+        else
+            c->R[d] &= ~(1 << b);
         c->cycles += 1;
+        TRACE("PC=%06lX  %04X  BLD  R%u,%u <- T=%u\n",
+              (unsigned long)cur_pc, op, d, b, GETBIT(c->sreg, F_T));
     }
 
-    /* BCLR – Clear Flag in SREG */
-    else if ((op & 0xFF8F) == 0x9488) /* Added per Section 6: BCLR */
-    {
-        uint8_t s = (op >> 4) & 0x07;
-        CLRBIT(c->sreg, s);
-        c->cycles += 1;
+/* ==================== CONTROL FLOW ==================== */
+
+    /* RJMP – 1100 kkkk kkkk kkkk (mask 0xF000 == 0xC000) */
+    else if ((op & 0xF000) == 0xC000) {
+        int16_t k = op & 0x0FFF; if (k & 0x0800) k |= 0xF000;
+        c->pc = cur_pc + 2 + (k << 1);
+        c->cycles += 2;
+        TRACE("PC=%06lX  %04X  RJMP %+d -> PC=0x%06lX\n",
+              (unsigned long)cur_pc, op, k, (unsigned long)c->pc);
     }
 
-    /* ------------------- Control‐flow instructions ------------------- */
-
-    /* JMP – Long Jump */
-    else if ((op & 0xFE0E) == 0x940C) /* Added per Section 6: JMP */
-    {
+    /* JMP – 1001 010k kkkk 110k (mask 0xFE0E == 0x940C) */
+    else if ((op & 0xFE0E) == 0x940C) {
         uint16_t op2 = flash_word(c, cur_pc + 2);
-        uint32_t k =
-            ((op & 0x0100) << 13)   /* K21 = bit8→bit21 */
-            | ((op & 0x00F0) << 13) /* K20..17 = bits7..4→bits20..17 */ 
-            | ((op & 0x0001) << 16) /* K16 = bit0→bit16 */
-            | (uint32_t)op2;        /* K15..0 from second word */
+        uint32_t k = ((op & 0x01F0) << 13) | ((op & 0x0001) << 16) | op2;
         c->pc = k << 1;
         c->cycles += 3;
+        TRACE("PC=%06lX  %04X  JMP  0x%06lX\n",
+              (unsigned long)cur_pc, op, (unsigned long)c->pc);
     }
 
-    /* CALL – Long Call to Subroutine */
-    else if ((op & 0xFE0E) == 0x940E) /* Added per Section 6: CALL */
-    {
+    /* RCALL – 1101 kkkk kkkk kkkk (mask 0xF000 == 0xD000) */
+    else if ((op & 0xF000) == 0xD000) {
+        int16_t k = op & 0x0FFF; if (k & 0x0800) k |= 0xF000;
+        push16(c, cur_pc + 2);
+        c->pc = cur_pc + 2 + (k << 1);
+        c->cycles += 3;
+        TRACE("PC=%06lX  %04X  RCALL %+d -> PC=0x%06lX\n",
+              (unsigned long)cur_pc, op, k, (unsigned long)c->pc);
+    }
+
+    /* CALL – 1001 010k kkkk 111k (mask 0xFE0E == 0x940E) */
+    else if ((op & 0xFE0E) == 0x940E) {
         uint16_t op2 = flash_word(c, cur_pc + 2);
-        uint32_t k =
-            ((op & 0x0100) << 13) | ((op & 0x00F0) << 13) | ((op & 0x0001) << 16) | (uint32_t)op2;
+        uint32_t k = ((op & 0x01F0) << 13) | ((op & 0x0001) << 16) | op2;
         push16(c, cur_pc + 4);
         c->pc = k << 1;
         c->cycles += 4;
+        TRACE("PC=%06lX  %04X  CALL 0x%06lX\n",
+              (unsigned long)cur_pc, op, (unsigned long)c->pc);
     }
 
-    /* RJMP – Relative Jump */
-    else if ((op & 0xF000) == 0xC000) /* Added per Section 6: RJMP */
-    {
-        int16_t k = op & 0x0FFF;
-        if (k & 0x0800)
-            k |= 0xF000;               /* sign‐extend 12‐bit */
-        c->pc = cur_pc + 2 + (k << 1); /* byte‐address = word*2 */
-        c->cycles += 2;
-    }
-
-    /* RCALL – Relative Call to Subroutine */
-    else if ((op & 0xF000) == 0xD000) /* Added per Section 6: RCALL */
-    {
-        int16_t k = op & 0x0FFF;
-        if (k & 0x0800)
-            k |= 0xF000;
-        push16(c, cur_pc + 2); /* return address = byte addr */
-        c->pc = cur_pc + 2 + (k << 1);
-        c->cycles += 3;
-    }
-
-    /* ------------------- Branch instructions ------------------- */
-    else if ((op & 0xFC00) == 0xF000) /* Added per Section 6: BRBS – Branch if Status Flag Set */
-    {
-        uint8_t s = op & 0x07;
-        int8_t k = (op >> 3) & 0x7F;
-        if (k & 0x40) k |= 0x80; /* sign extend 7-bit */
-        if (GETBIT(c->sreg, s))
-        {
-            c->pc = cur_pc + 2 + (k << 1);
-            c->cycles += 2;
-        }
-        else
-        {
-            c->cycles += 1;
-        }
-    }
-    else if ((op & 0xFC00) == 0xF400) /* Added per Section 6: BRBC – Branch if Status Flag Cleared */
-    {
-        uint8_t s = op & 0x07;
-        int8_t k = (op >> 3) & 0x7F;
-        if (k & 0x40) k |= 0x80; /* sign extend 7-bit */
-        if (!GETBIT(c->sreg, s))
-        {
-            c->pc = cur_pc + 2 + (k << 1);
-            c->cycles += 2;
-        }
-        else
-        {
-            c->cycles += 1;
-        }
-    }
-
-    /* IJMP – Indirect Jump (Z) */
-    else if (op == 0x9409) /* Added per Section 6: IJMP */
-    {
-        uint16_t z = (uint16_t)c->R[30] | ((uint16_t)c->R[31] << 8);
-        c->pc = ((uint32_t)z) << 1; /* word→byte */
-        c->cycles += 2;
-    }
-
-    /* EIJMP – Extended Indirect Jump (EIND:Z) */
-    else if (op == 0x9419) /* Added per Section 6: EIJMP */
-    {
-        uint32_t z = (uint32_t)c->R[30] | ((uint32_t)c->R[31] << 8) | ((uint32_t)c->eind << 16);
-        c->pc = z << 1;
-        c->cycles += 2;
-    }
-
-    /* ICALL – Indirect Call to Subroutine (Z) */
-    else if (op == 0x9509) /* Added per Section 6: ICALL */
-    {
-        uint16_t z = (uint16_t)c->R[30] | ((uint16_t)c->R[31] << 8);
-        push16(c, cur_pc + 2);
-        c->pc = ((uint32_t)z) << 1;
-        c->cycles += 3;
-    }
-
-    /* EICALL – Extended Indirect Call (EIND:Z) */
-    else if (op == 0x9519) /* Added per Section 6: EICALL */
-    {
-        uint32_t z = (uint32_t)c->R[30] | ((uint32_t)c->R[31] << 8) | ((uint32_t)c->eind << 16);
-        /* push 22‐bit return address */
-        push16(c, cur_pc + 2);        /* low word */
-        push8(c, (cur_pc + 2) >> 16); /* high byte */
-        c->pc = z << 1;
-        c->cycles += 4;
-    }
-
-    /* RET – Return from Subroutine */
-    else if (op == 0x9508) /* Added per Section 6: RET */
-    {
+    /* RET – 1001 0101 0000 1000 (opcode 0x9508) */
+    else if (op == 0x9508) {
         uint16_t ret = pop16(c);
         c->pc = ret;
         c->cycles += 4;
+        TRACE("PC=%06lX  %04X  RET  -> PC=0x%06lX\n",
+              (unsigned long)cur_pc, op, (unsigned long)c->pc);
     }
 
-    /* RETI – Return from Interrupt */
-    else if (op == 0x9518) /* Added per Section 6: RETI */
-    {
+    /* RETI – 1001 0101 0001 1000 (opcode 0x9518) */
+    else if (op == 0x9518) {
         uint16_t ret = pop16(c);
         c->pc = ret;
-        SETBIT(c->sreg, F_I); /* re‐enable interrupts */
+        SETBIT(c->sreg, F_I);
         c->cycles += 4;
+        TRACE("PC=%06lX  %04X  RETI -> PC=0x%06lX  I=1\n",
+              (unsigned long)cur_pc, op, (unsigned long)c->pc);
     }
 
-    /* ------------------- Data-Transfer instructions ------------------- */
+    /* BRBS/BRBC – 1111 00ss kkkk kkkk / 1111 01ss kkkk kkkk */
+    else if ((op & 0xFC00) == 0xF000 || (op & 0xFC00) == 0xF400) {
+        uint8_t s = op & 0x07;                 /* flag testada            */
+        int8_t  k = (op >> 3) & 0x7F; if (k & 0x40) k |= 0x80;
+        int take = ((op & 0x0400) == 0) ? GETBIT(c->sreg,s) : !GETBIT(c->sreg,s);
+        if (take) {
+            c->pc = cur_pc + 2 + (k << 1);
+            c->cycles += 2;
+            TRACE("PC=%06lX  %04X  BR%s  S=%u k=%+d -> PC=0x%06lX\n",
+                  (unsigned long)cur_pc, op,
+                  ((op & 0x0400) ? "BC":"BS"), s, k,
+                  (unsigned long)c->pc);
+        } else {
+            c->cycles += 1;
+            TRACE("PC=%06lX  %04X  BR%s  (não salta)\n",
+                  (unsigned long)cur_pc, op,
+                  ((op & 0x0400) ? "BC":"BS"));
+        }
+    }
 
-    /* LDI – Load Immediate              */
-    else if ((op & 0xF000) == 0xE000)
-    { /* Added per Section 6: LDI */
+/* ==================== REGISTER MANIPULATION ==================== */
+
+    /* MOV – 0010 11rd dddd rrrr (mask 0xFC00 == 0x2C00) */
+    else if ((op & 0xFC00) == 0x2C00) {
+        uint8_t d = (op >> 4) & 0x1F;
+        uint8_t r = ((op & 0x200) >> 5) | (op & 0x0F);
+        c->R[d] = c->R[r];
+        c->cycles += 1;
+        TRACE("PC=%06lX  %04X  MOV  R%u,R%u -> 0x%02X\n",
+              (unsigned long)cur_pc, op, d, r, c->R[d]);
+    }
+
+    /* MOVW – 0000 0001 dddd rrrr (mask 0xFF00 == 0x0100) */
+    else if ((op & 0xFF00) == 0x0100) {
+        uint8_t d = ((op >> 3) & 0x1E);
+        uint8_t r = ((op & 0x0F) << 1);
+        c->R[d]   = c->R[r];
+        c->R[d+1] = c->R[r+1];
+        c->cycles += 1;
+        TRACE("PC=%06lX  %04X  MOVW R%u:R%u <- R%u:R%u\n",
+              (unsigned long)cur_pc, op, d+1, d, r+1, r);
+    }
+
+    /* LDS – 1001 000d dddd 0000 (mask 0xFE0F == 0x9000) */
+    else if ((op & 0xFE0F) == 0x9000) {
+        uint8_t d   = (op >> 4) & 0x1F;
+        uint16_t ea = flash_word(c, cur_pc + 2);
+        c->R[d] = read_data(c, ea);
+        c->pc += 2;
+        c->cycles += 2;
+        TRACE("PC=%06lX  %04X  LDS  R%u <- [0x%04X]=0x%02X\n",
+              (unsigned long)cur_pc, op, d, ea, c->R[d]);
+    }
+
+    /* STS – 1001 001r rrrr 0000 (mask 0xFE0F == 0x9200) */
+    else if ((op & 0xFE0F) == 0x9200) {
+        uint8_t r   = (op >> 4) & 0x1F;
+        uint16_t ea = flash_word(c, cur_pc + 2);
+        write_data(c, ea, c->R[r]);
+        c->pc += 2;
+        c->cycles += 2;
+        TRACE("PC=%06lX  %04X  STS  [0x%04X] <- R%u=0x%02X\n",
+              (unsigned long)cur_pc, op, ea, r, c->R[r]);
+    }
+
+    /* LDI – 1110 KKKK dddd KKKK (mask 0xF000 == 0xE000) */
+    else if ((op & 0xF000) == 0xE000) {
         uint8_t d = 16 + ((op >> 4) & 0x0F);
         uint8_t K = ((op >> 4) & 0xF0) | (op & 0x0F);
         c->R[d] = K;
         c->cycles += 1;
+        TRACE("PC=%06lX  %04X  LDI  R%u,0x%02X\n",
+              (unsigned long)cur_pc, op, d, K);
     }
 
-    /* LDS – Load Direct from Data Space */
-    else if ((op & 0xFE0F) == 0x9000)
-    { /* Added per Section 6: LDS */
-        uint8_t d = (op >> 4) & 0x1F;
-        uint16_t addr = flash_word(c, cur_pc + 2); /* immediate follows */
-        c->R[d] = read_data(c, addr);
-        c->pc += 2;
+    /* PUSH – 1001 001r rrrr 1111 (mask 0xFE0F == 0x920F) */
+    else if ((op & 0xFE0F) == 0x920F) {
+        uint8_t r = (op >> 4) & 0x1F;
+        push8(c, c->R[r]);
         c->cycles += 2;
+        TRACE("PC=%06lX  %04X  PUSH R%u=0x%02X\n",
+              (unsigned long)cur_pc, op, r, c->R[r]);
     }
 
-    /* STS – Store Direct to Data Space */
-    else if ((op & 0xFE0F) == 0x9200)
-    { /* Added per Section 6: STS */
-        uint8_t r = (op >> 4) & 0x1F;
-        uint16_t addr = flash_word(c, cur_pc + 2);
-        write_data(c, addr, c->R[r]);
-        c->pc += 2;
+    /* POP – 1001 000d dddd 1111 (mask 0xFE0F == 0x900F) */
+    else if ((op & 0xFE0F) == 0x900F) {
+        uint8_t d = (op >> 4) & 0x1F;
+        c->R[d] = pop8(c);
         c->cycles += 2;
+        TRACE("PC=%06lX  %04X  POP  R%u <- 0x%02X\n",
+              (unsigned long)cur_pc, op, d, c->R[d]);
     }
 
-    /* LD Rd, X – Load Indirect using X */
-    else if ((op & 0xFE0F) == 0x900C)
-    { /* Added per Section 6: LD Rd,X */
-        uint8_t d = (op >> 4) & 0x1F;
-        uint16_t addr = (uint16_t)c->R[27] << 8 | c->R[26];
-        c->R[d] = read_data(c, addr);
-        c->cycles += 2;
-    }
-    /* LD Rd, X+ – Load Indirect + Post‐increment X */
-    else if ((op & 0xFE0F) == 0x900D)
-    { /* Added per Section 6: LD Rd,X+ */
-        uint8_t d = (op >> 4) & 0x1F;
-        uint16_t addr = (uint16_t)c->R[27] << 8 | c->R[26];
-        c->R[d] = read_data(c, addr);
-        addr++;
-        c->R[26] = addr & 0xFF;
-        c->R[27] = addr >> 8;
-        c->cycles += 2;
-    }
-    /* LD Rd, –X – Load Indirect + Pre-decrement X */
-    else if ((op & 0xFE0F) == 0x900E)
-    { /* Added per Section 6: LD Rd,–X */
-        uint8_t d = (op >> 4) & 0x1F;
-        uint16_t addr = (uint16_t)c->R[27] << 8 | c->R[26];
-        addr--;
-        c->R[26] = addr & 0xFF;
-        c->R[27] = addr >> 8;
-        c->R[d] = read_data(c, addr);
-        c->cycles += 3;
-    }
-
-    /* ST X, Rd – Store Indirect using X */
-    else if ((op & 0xFE0F) == 0x920C)
-    { /* Added per Section 6: ST X,Rd */
-        uint8_t r = (op >> 4) & 0x1F;
-        uint16_t addr = (uint16_t)c->R[27] << 8 | c->R[26];
-        write_data(c, addr, c->R[r]);
-        c->cycles += 2;
-    }
-    /* ST X+, Rd – Store Indirect + Post‐increment X */
-    else if ((op & 0xFE0F) == 0x920D)
-    { /* Added per Section 6: ST X+,Rd */
-        uint8_t r = (op >> 4) & 0x1F;
-        uint16_t addr = (uint16_t)c->R[27] << 8 | c->R[26];
-        write_data(c, addr, c->R[r]);
-        addr++;
-        c->R[26] = addr & 0xFF;
-        c->R[27] = addr >> 8;
-        c->cycles += 2;
-    }
-    /* ST –X, Rd – Store Indirect + Pre-decrement X */
-    else if ((op & 0xFE0F) == 0x920E)
-    { /* Added per Section 6: ST –X,Rd */
-        uint8_t r = (op >> 4) & 0x1F;
-        uint16_t addr = (uint16_t)c->R[27] << 8 | c->R[26];
-        addr--;
-        c->R[26] = addr & 0xFF;
-        c->R[27] = addr >> 8;
-        write_data(c, addr, c->R[r]);
-        c->cycles += 2;
-    }
-
-    /* LD Rd, Y – Load Indirect using Y */
-    else if ((op & 0xFE0F) == 0x8008)
-    { /* Added per Section 6: LD Rd,Y */
-        uint8_t d = (op >> 4) & 0x1F;
-        uint16_t addr = (uint16_t)c->R[29] << 8 | c->R[28];
-        c->R[d] = read_data(c, addr);
-        c->cycles += 2;
-    }
-    /* LD Rd, Y+ – Load Indirect + Post‐increment Y */
-    else if ((op & 0xFE0F) == 0x9009)
-    { /* Added per Section 6: LD Rd,Y+ */
-        uint8_t d = (op >> 4) & 0x1F;
-        uint16_t addr = (uint16_t)c->R[29] << 8 | c->R[28];
-        c->R[d] = read_data(c, addr);
-        addr++;
-        c->R[28] = addr & 0xFF;
-        c->R[29] = addr >> 8;
-        c->cycles += 2;
-    }
-    /* LD Rd, –Y – Load Indirect + Pre-decrement Y */
-    else if ((op & 0xFE0F) == 0x900A)
-    { /* Added per Section 6: LD Rd,–Y */
-        uint8_t d = (op >> 4) & 0x1F;
-        uint16_t addr = (uint16_t)c->R[29] << 8 | c->R[28];
-        addr--;
-        c->R[28] = addr & 0xFF;
-        c->R[29] = addr >> 8;
-        c->R[d] = read_data(c, addr);
-        c->cycles += 3;
-    }
-
-    /* ST Y, Rd – Store Indirect using Y */
-    else if ((op & 0xFE0F) == 0x8208)
-    { /* Added per Section 6: ST Y,Rd */
-        uint8_t r = (op >> 4) & 0x1F;
-        uint16_t addr = (uint16_t)c->R[29] << 8 | c->R[28];
-        write_data(c, addr, c->R[r]);
-        c->cycles += 2;
-    }
-    /* ST Y+, Rd – Store Indirect + Post‐increment Y */
-    else if ((op & 0xFE0F) == 0x9209)
-    { /* Added per Section 6: ST Y+,Rd */
-        uint8_t r = (op >> 4) & 0x1F;
-        uint16_t addr = (uint16_t)c->R[29] << 8 | c->R[28];
-        write_data(c, addr, c->R[r]);
-        addr++;
-        c->R[28] = addr & 0xFF;
-        c->R[29] = addr >> 8;
-        c->cycles += 2;
-    }
-    /* ST –Y, Rd – Store Indirect + Pre-decrement Y */
-    else if ((op & 0xFE0F) == 0x920A)
-    { /* Added per Section 6: ST –Y,Rd */
-        uint8_t r = (op >> 4) & 0x1F;
-        uint16_t addr = (uint16_t)c->R[29] << 8 | c->R[28];
-        addr--;
-        c->R[28] = addr & 0xFF;
-        c->R[29] = addr >> 8;
-        write_data(c, addr, c->R[r]);
-        c->cycles += 2;
-    }
-
-    /* LD Rd, Z – Load Indirect using Z */
-    else if ((op & 0xFE0F) == 0x8000)
-    { /* Added per Section 6: LD Rd,Z */
-        uint8_t d = (op >> 4) & 0x1F;
-        uint32_t addr = (uint16_t)c->R[31] << 8 | c->R[30];
-        c->R[d] = read_data(c, addr);
-        c->cycles += 2;
-    }
-    /* LD Rd, Z+ – Load Indirect + Post‐increment Z */
-    else if ((op & 0xFE0F) == 0x9001)
-    { /* Added per Section 6: LD Rd,Z+ */
-        uint8_t d = (op >> 4) & 0x1F;
-        uint32_t addr = (uint16_t)c->R[31] << 8 | c->R[30];
-        c->R[d] = read_data(c, addr);
-        addr++;
-        c->R[30] = addr & 0xFF;
-        c->R[31] = addr >> 8;
-        c->cycles += 2;
-    }
-    /* LD Rd, –Z – Load Indirect + Pre-decrement Z */
-    else if ((op & 0xFE0F) == 0x9002)
-    { /* Added per Section 6: LD Rd,–Z */
-        uint8_t d = (op >> 4) & 0x1F;
-        uint32_t addr = (uint16_t)c->R[31] << 8 | c->R[30];
-        addr--;
-        c->R[30] = addr & 0xFF;
-        c->R[31] = addr >> 8;
-        c->R[d] = read_data(c, addr);
-        c->cycles += 3;
-    }
-
-    /* ST Z, Rd – Store Indirect using Z */
-   else if ((op & 0xFE0F) == 0x8200)
-    { /* Added per Section 6: ST Z,Rd */
-        uint8_t r = (op >> 4) & 0x1F;
-        uint32_t addr = (uint16_t)c->R[31] << 8 | c->R[30];
-        write_data(c, addr, c->R[r]);
-        c->cycles += 2;
-    }
-    /* ST Z+, Rd – Store Indirect + Post‐increment Z */
-    else if ((op & 0xFE0F) == 0x9201)
-    { /* Added per Section 6: ST Z+,Rd */
-        uint8_t r = (op >> 4) & 0x1F;
-        uint32_t addr = (uint16_t)c->R[31] << 8 | c->R[30];
-        write_data(c, addr, c->R[r]);
-        addr++;
-        c->R[30] = addr & 0xFF;
-        c->R[31] = addr >> 8;
-        c->cycles += 2;
-    }
-    /* ST –Z, Rd – Store Indirect + Pre-decrement Z */
-    else if ((op & 0xFE0F) == 0x9202)
-    { /* Added per Section 6: ST –Z,Rd */
-        uint8_t r = (op >> 4) & 0x1F;
-        uint32_t addr = (uint16_t)c->R[31] << 8 | c->R[30];
-        addr--;
-        c->R[30] = addr & 0xFF;
-        c->R[31] = addr >> 8;
-        write_data(c, addr, c->R[r]);
-        c->cycles += 2;
-    }
-
-    /* IN – Load from I/O Location        */
-    else if ((op & 0xF800) == 0xB000)
-    { /* Added per Section 6: IN */
+    /* IN – 1011 0AAd dddd AAAA (mask 0xF800 == 0xB000) */
+    else if ((op & 0xF800) == 0xB000) {
         uint8_t d = (op >> 4) & 0x1F;
         uint8_t A = ((op >> 5) & 0x30) | (op & 0x0F);
         c->R[d] = read_data(c, 0x20 + A);
         c->cycles += 1;
+        TRACE("PC=%06lX  %04X  IN   R%u <- I/O[0x%02X]=0x%02X\n",
+              (unsigned long)cur_pc, op, d, 0x20 + A, c->R[d]);
     }
 
-    /* OUT – Store to I/O Location        */
-    else if ((op & 0xF800) == 0xB800)
-    { /* Added per Section 6: OUT */
-        uint8_t A = ((op >> 5) & 0x30) | (op & 0x0F);
+    /* OUT – 1011 1AAr rrrr AAAA (mask 0xF800 == 0xB800) */
+    else if ((op & 0xF800) == 0xB800) {
         uint8_t r = (op >> 4) & 0x1F;
+        uint8_t A = ((op >> 5) & 0x30) | (op & 0x0F);
         write_data(c, 0x20 + A, c->R[r]);
         c->cycles += 1;
+        TRACE("PC=%06lX  %04X  OUT  I/O[0x%02X] <- R%u=0x%02X\n",
+              (unsigned long)cur_pc, op, 0x20 + A, r, c->R[r]);
     }
 
-    /* LPM – Load Program Memory          */
-    else if (op == 0x95C8)
-    { /* Added per Section 6: LPM (R0 implied) */
-        uint32_t addr = ((uint16_t)c->R[31] << 8 | c->R[30]) + ((uint32_t)c->rampz << 16);
-        uint16_t w = flash_word(c, addr);
-        c->R[0] = (uint8_t)(w & ((c->R[30] & 1) ? 0xFF : 0x00) ? (w >> 8) : w);
-        /* LSb selects low versus high—but full low‐level support is complex */
-        c->cycles += 3;
-    }
-    else if ((op & 0xFE0F) == 0x9004)
-    { /* Added per Section 6: LPM Rd,Z */
+/* ==================== COMPARE AND TEST ==================== */
+
+    /* CP – 0001 01rd dddd rrrr (mask 0xFC00 == 0x1400) */
+    else if ((op & 0xFC00) == 0x1400) {
         uint8_t d = (op >> 4) & 0x1F;
-        uint32_t addr = ((uint16_t)c->R[31] << 8 | c->R[30]);
-        uint16_t w = flash_word(c, addr);
-        c->R[d] = (addr & 1) ? (w >> 8) : (w & 0xFF);
-        c->cycles += 3;
+        uint8_t r = ((op & 0x200) >> 5) | (op & 0x0F);
+        uint8_t a = c->R[d], b = c->R[r];
+        uint16_t res = (uint16_t)a - (uint16_t)b;
+        flags_sub(c, a, b, res, 0);
+        c->cycles += 1;
+        TRACE("PC=%06lX  %04X  CP   R%u,R%u (flags)\n",
+              (unsigned long)cur_pc, op, d, r);
     }
-    else if ((op & 0xFE0F) == 0x9005)
-    { /* Added per Section 6: LPM Rd,Z+ */
+
+    /* CPC – 0000 01rd dddd rrrr (mask 0xFC00 == 0x0400) */
+    else if ((op & 0xFC00) == 0x0400) {
         uint8_t d = (op >> 4) & 0x1F;
-        uint32_t addr = ((uint16_t)c->R[31] << 8 | c->R[30]);
-        uint16_t w = flash_word(c, addr);
-        c->R[d] = (addr & 1) ? (w >> 8) : (w & 0xFF);
-        addr++;
-        c->R[30] = addr & 0xFF;
-        c->R[31] = addr >> 8;
-        c->cycles += 3;
+        uint8_t r = ((op & 0x200) >> 5) | (op & 0x0F);
+        uint8_t a = c->R[d], b = c->R[r], c_in = GETBIT(c->sreg, F_C);
+        uint16_t res = (uint16_t)a - (uint16_t)b - c_in;
+        flags_sub(c, a, b, res, c_in);
+        c->cycles += 1;
+        TRACE("PC=%06lX  %04X  CPC  R%u,R%u (flags)\n",
+              (unsigned long)cur_pc, op, d, r);
     }
 
-    /* ELPM – Extended Load Program Memory */
-    else if (op == 0x95D8)
-    { /* Added per Section 6: ELPM (R0 implied) */
-        uint32_t addr = ((uint16_t)c->R[31] << 8 | c->R[30]) + ((uint32_t)c->rampz << 16);
-        uint16_t w = flash_word(c, addr);
-        c->R[0] = (addr & 1) ? (w >> 8) : (w & 0xFF);
-        c->cycles += 3;
-    }
-    else if ((op & 0xFE0F) == 0x9006)
-    { /* Added per Section 6: ELPM Rd,Z */
+    /* CPSE – 0001 00rd dddd rrrr (mask 0xFC00 == 0x1000) */
+    else if ((op & 0xFC00) == 0x1000) {
         uint8_t d = (op >> 4) & 0x1F;
-        uint32_t addr = ((uint16_t)c->R[31] << 8 | c->R[30]) + ((uint32_t)c->rampz << 16);
-        uint16_t w = flash_word(c, addr);
-        c->R[d] = (addr & 1) ? (w >> 8) : (w & 0xFF);
-        c->cycles += 3;
+        uint8_t r = ((op & 0x200) >> 5) | (op & 0x0F);
+        int skip = (c->R[d] == c->R[r]);
+        if (skip) {
+            uint16_t nxt = flash_word(c, cur_pc + 2);
+            c->pc += ((nxt & 0xF000) == 0x9000 && (nxt & 0x0E00) != 0) ? 4 : 2;
+            c->cycles += 1;
+        }
+        c->cycles += 1;
+        TRACE("PC=%06lX  %04X  CPSE R%u,R%u %s\n",
+              (unsigned long)cur_pc, op, d, r, skip?"--> skip":"");
     }
-    else if ((op & 0xFE0F) == 0x9007)
-    { /* Added per Section 6: ELPM Rd,Z+ */
+
+    /* TST – (é um AND Rd,Rd) 0010 00dd dddd dddd onde d=r */
+    else if ((op & 0xFE0F) == 0x2000 && ((op >> 4) & 0x1F) == (op & 0x1F)) {
         uint8_t d = (op >> 4) & 0x1F;
-        uint32_t addr = ((uint16_t)c->R[31] << 8 | c->R[30]) + ((uint32_t)c->rampz << 16);
-        uint16_t w = flash_word(c, addr);
-        c->R[d] = (addr & 1) ? (w >> 8) : (w & 0xFF);
-        addr++;
-        c->R[30] = addr & 0xFF;
-        c->R[31] = addr >> 8;
-        c->cycles += 3;
+        uint8_t res = c->R[d] & c->R[d];
+        flags_logic(c, res);
+        c->cycles += 1;
+        TRACE("PC=%06lX  %04X  TST  R%u (flags)\n",
+              (unsigned long)cur_pc, op, d);
     }
 
-    /* SPM – Store Program Memory        */
-    else if (op == 0x95E8)
-    { /* Added per Section 6: SPM */
-        /* Not implementing full SPM sequence—NOP placeholder */
-        c->cycles += 4;
-    }
-    else if (op == 0x95F8)
-    { /* Added per Section 6: SPM Z+ */
-        /* Again placeholder only */
-        c->cycles += 4;
+    /* SBRC – 1111 11rd dddd 0bbb (mask 0xFE08 == 0xFC00) */
+    else if ((op & 0xFE08) == 0xFC00) {
+        uint8_t r = ((op & 0x0200) >> 5) | (op & 0x0F);
+        uint8_t b = op & 0x07;
+        int skip = !(c->R[r] & (1 << b));
+        if (skip) {
+            uint16_t nxt = flash_word(c, cur_pc + 2);
+            c->pc += ((nxt & 0xF000) == 0x9000 && (nxt & 0x0E00) != 0) ? 4 : 2;
+            c->cycles += 1;
+        }
+        c->cycles += 1;
+        TRACE("PC=%06lX  %04X  SBRC R%u,%u %s\n",
+              (unsigned long)cur_pc, op, r, b, skip?"--> skip":"");
     }
 
-    /* ------------------------------------------------------------------- */
+    /* SBRS – 1111 11rd dddd 1bbb (mask 0xFE08 == 0xFE00) */
+    else if ((op & 0xFE08) == 0xFE00) {
+        uint8_t r = ((op & 0x0200) >> 5) | (op & 0x0F);
+        uint8_t b = op & 0x07;
+        int skip = (c->R[r] & (1 << b));
+        if (skip) {
+            uint16_t nxt = flash_word(c, cur_pc + 2);
+            c->pc += ((nxt & 0xF000) == 0x9000 && (nxt & 0x0E00) != 0) ? 4 : 2;
+            c->cycles += 1;
+        }
+        c->cycles += 1;
+        TRACE("PC=%06lX  %04X  SBRS R%u,%u %s\n",
+              (unsigned long)cur_pc, op, r, b, skip?"--> skip":"");
+    }
 
-    else
-    {
-        fprintf(stderr, "Unimplemented opcode %04X\n", op);
+/* ==================== SHIFT AND ROTATE ==================== */
+
+    /* LSR – 1001 010d dddd 0110 (mask 0xFE0F == 0x9406) */
+    else if ((op & 0xFE0F) == 0x9406) {
+        uint8_t d   = (op >> 4) & 0x1F;
+        uint8_t lsb = c->R[d] & 1;
+        uint8_t res = c->R[d] >> 1;
+        c->R[d]     = res;
+        CLRBIT(c->sreg, F_N);
+        (res==0)? SETBIT(c->sreg,F_Z):CLRBIT(c->sreg,F_Z);
+        CLRBIT(c->sreg, F_V);
+        (GETBIT(c->sreg,F_N)^GETBIT(c->sreg,F_V))?SETBIT(c->sreg,F_S):CLRBIT(c->sreg,F_S);
+        lsb?SETBIT(c->sreg,F_C):CLRBIT(c->sreg,F_C);
+        c->cycles += 1;
+        TRACE("PC=%06lX  %04X  LSR  R%u -> 0x%02X\n",
+              (unsigned long)cur_pc, op, d, res);
+    }
+
+    /* ROL – 0001 11dd dddd dddd onde d=r (ADC Rd,Rd) */
+    else if ((op & 0xFE0F) == 0x1C00 && ((op >> 4)&0x1F)==(op&0x1F)) {
+        uint8_t d   = (op >> 4) & 0x1F;
+        uint8_t cin = GETBIT(c->sreg, F_C);
+        uint8_t msb = (c->R[d] & 0x80) ? 1 : 0;
+        uint8_t res = (c->R[d] << 1) | cin;
+        c->R[d] = res;
+        flags_add(c, c->R[d], c->R[d], res, cin);  /* Reutiliza lógica de ADC */
+        SETBIT(c->sreg, F_C); if (!msb) CLRBIT(c->sreg, F_C);
+        c->cycles += 1;
+        TRACE("PC=%06lX  %04X  ROL  R%u -> 0x%02X\n",
+              (unsigned long)cur_pc, op, d, res);
+    }
+
+    /* ROR – 1001 010d dddd 0111 (mask 0xFE0F == 0x9407) */
+    else if ((op & 0xFE0F) == 0x9407) {
+        uint8_t d   = (op >> 4) & 0x1F;
+        uint8_t cin = GETBIT(c->sreg, F_C);
+        uint8_t lsb = c->R[d] & 1;
+        uint8_t res = (c->R[d] >> 1) | (cin << 7);
+        c->R[d] = res;
+        if (res & 0x80) SETBIT(c->sreg,F_N); else CLRBIT(c->sreg,F_N);
+        (res==0)?SETBIT(c->sreg,F_Z):CLRBIT(c->sreg,F_Z);
+        CLRBIT(c->sreg,F_V);
+        (GETBIT(c->sreg,F_N)^GETBIT(c->sreg,F_V))?SETBIT(c->sreg,F_S):CLRBIT(c->sreg,F_S);
+        lsb?SETBIT(c->sreg,F_C):CLRBIT(c->sreg,F_C);
+        c->cycles += 1;
+        TRACE("PC=%06lX  %04X  ROR  R%u -> 0x%02X\n",
+              (unsigned long)cur_pc, op, d, res);
+    }
+
+    /* ASR – 1001 010d dddd 0101 (mask 0xFE0F == 0x9405) */
+    else if ((op & 0xFE0F) == 0x9405) {
+        uint8_t d   = (op >> 4) & 0x1F;
+        uint8_t msb = c->R[d] & 0x80;
+        uint8_t lsb = c->R[d] & 1;
+        uint8_t res = (c->R[d] >> 1) | msb;
+        c->R[d] = res;
+        if (res & 0x80) SETBIT(c->sreg,F_N); else CLRBIT(c->sreg,F_N);
+        (res==0)?SETBIT(c->sreg,F_Z):CLRBIT(c->sreg,F_Z);
+        if (GETBIT(c->sreg,F_N)^GETBIT(c->sreg,F_C))
+            SETBIT(c->sreg,F_V); else CLRBIT(c->sreg,F_V);
+        (GETBIT(c->sreg,F_N)^GETBIT(c->sreg,F_V))?SETBIT(c->sreg,F_S):CLRBIT(c->sreg,F_S);
+        lsb?SETBIT(c->sreg,F_C):CLRBIT(c->sreg,F_C);
+        c->cycles += 1;
+        TRACE("PC=%06lX  %04X  ASR  R%u -> 0x%02X\n",
+              (unsigned long)cur_pc, op, d, res);
+    }
+
+    /* SWAP – 1001 010d dddd 0010 (mask 0xFE0F == 0x9402) */
+    else if ((op & 0xFE0F) == 0x9402) {
+        uint8_t d = (op >> 4) & 0x1F;
+        uint8_t val = c->R[d];
+        c->R[d] = (val << 4) | (val >> 4);
+        c->cycles += 1;
+        TRACE("PC=%06lX  %04X  SWAP R%u -> 0x%02X\n",
+              (unsigned long)cur_pc, op, d, c->R[d]);
+    }
+
+/* ==================== MCU CONTROL ==================== */
+
+    /* NOP – 0000 0000 0000 0000 */
+    else if (op == 0x0000) {
+        c->cycles += 1;
+        TRACE("PC=%06lX  0000  NOP\n", (unsigned long)cur_pc);
+    }
+
+    /* SLEEP – 1001 0101 1000 1000 (opcode 0x9588) */
+    else if (op == 0x9588) {
+        c->cycles += 1;
+        TRACE("PC=%06lX  %04X  SLEEP (ignorado)\n",
+              (unsigned long)cur_pc, op);
+    }
+
+    /* WDR – 1001 0101 1010 1000 (opcode 0x95A8) */
+    else if (op == 0x95A8) {
+        c->cycles += 1;
+        TRACE("PC=%06lX  %04X  WDR (ignorado)\n",
+              (unsigned long)cur_pc, op);
+    }
+
+/* ==================== SREG MANIPULATION ==================== */
+
+    /* SEI – 1001 0100 0111 1000 (opcode 0x9478) */
+    else if (op == 0x9478) {
+        SETBIT(c->sreg, F_I);
+        c->cycles += 1;
+        TRACE("PC=%06lX  %04X  SEI  (I=1)\n",
+              (unsigned long)cur_pc, op);
+    }
+
+    /* CLI – 1001 0100 1111 1000 (opcode 0x94F8) */
+    else if (op == 0x94F8) {
+        CLRBIT(c->sreg, F_I);
+        c->cycles += 1;
+        TRACE("PC=%06lX  %04X  CLI  (I=0)\n",
+              (unsigned long)cur_pc, op);
+    }
+
+    /* CLC – 1001 0100 1000 1000 (opcode 0x9488) */
+    else if (op == 0x9488) {
+        CLRBIT(c->sreg, F_C);
+        c->cycles += 1;
+        TRACE("PC=%06lX  %04X  CLC  (C=0)\n",
+              (unsigned long)cur_pc, op);
+    }
+
+    /* CLZ – 1001 0100 1001 1000 (opcode 0x9498) */
+    else if (op == 0x9498) {
+        CLRBIT(c->sreg, F_Z);
+        c->cycles += 1;
+        TRACE("PC=%06lX  %04X  CLZ  (Z=0)\n",
+              (unsigned long)cur_pc, op);
+    }
+
+    /* CLN – 1001 0100 1010 1000 (opcode 0x94A8) */
+    else if (op == 0x94A8) {
+        CLRBIT(c->sreg, F_N);
+        c->cycles += 1;
+        TRACE("PC=%06lX  %04X  CLN  (N=0)\n",
+              (unsigned long)cur_pc, op);
+    }
+
+    /* CLV – 1001 0100 1011 1000 (opcode 0x94B8) */
+    else if (op == 0x94B8) {
+        CLRBIT(c->sreg, F_V);
+        c->cycles += 1;
+        TRACE("PC=%06lX  %04X  CLV  (V=0)\n",
+              (unsigned long)cur_pc, op);
+    }
+
+    /* CLT – 1001 0100 1110 1000 (opcode 0x94E8) */
+    else if (op == 0x94E8) {
+        CLRBIT(c->sreg, F_T);
+        c->cycles += 1;
+        TRACE("PC=%06lX  %04X  CLT  (T=0)\n",
+              (unsigned long)cur_pc, op);
+    }
+
+/* ==================== UNKNOWN ==================== */
+
+    else {
+        fprintf(stderr,"Unknown opcode %04X at PC=%06lX\n",
+                op,(unsigned long)cur_pc);
         c->running = 0;
     }
 }
