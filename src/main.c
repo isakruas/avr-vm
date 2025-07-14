@@ -18,11 +18,11 @@
 #include <ctype.h>
 
 #ifdef _WIN32
-#include <io.h>
-#define fileno _fileno
+    #include <io.h>
+    #define fileno _fileno
 #else
-#include <unistd.h>
-#include <fcntl.h>
+    #include <unistd.h>
+    #include <fcntl.h>
 #endif
 
 /*
@@ -259,9 +259,10 @@ static void avr_step(avr_t *c)
     uint32_t cur_pc = c->pc;
     uint16_t op = flash_word(c, cur_pc);
     c->pc += 2;
-    
+     
     if (g_trace)
-        printf("%06lX: %04X\n", (unsigned long)cur_pc, op);
+        printf("PC = %06lX, instr = %04X\n", (unsigned long)cur_pc, op);
+
 
     if (op == 0x0000)
     {
@@ -291,7 +292,7 @@ static void avr_step(avr_t *c)
             SETBIT(c->sreg, F_N);
         else
             CLRBIT(c->sreg, F_N);
-        /* Two’s‐compl overflow for 16‐bit add: (~(A ^ K) & (A ^ R)) & 0x8000 */
+        /* Two's‐compl overflow for 16‐bit add: (~(A ^ K) & (A ^ R)) & 0x8000 */
         if ((~(a ^ K) & (a ^ r) & 0x8000) != 0)
             SETBIT(c->sreg, F_V);
         else
@@ -364,6 +365,63 @@ static void avr_step(avr_t *c)
         uint16_t r = (uint16_t)a - (uint16_t)K - cin;
         c->R[d] = (uint8_t)r;
         flags_sub(c, a, K, r, cin);
+        c->cycles += 1;
+    }
+
+    /* ------------------- Logical instructions ------------------- */
+    else if ((op & 0xFC00) == 0x2000) /* Added per Section 6: AND – Logical AND */
+    {
+        uint8_t d = (op >> 4) & 0x1F, r = ((op & 0x200) >> 5) | (op & 0x0F);
+        uint8_t res = c->R[d] & c->R[r];
+        c->R[d] = res;
+        flags_logic(c, res);
+        c->cycles += 1;
+    }
+    else if ((op & 0xFC00) == 0x2400) /* Added per Section 6: EOR – Exclusive OR */
+    {
+        uint8_t d = (op >> 4) & 0x1F, r = ((op & 0x200) >> 5) | (op & 0x0F);
+        uint8_t res = c->R[d] ^ c->R[r];
+        c->R[d] = res;
+        flags_logic(c, res);
+        c->cycles += 1;
+    }
+    else if ((op & 0xFC00) == 0x2800) /* Added per Section 6: OR – Logical OR */
+    {
+        uint8_t d = (op >> 4) & 0x1F, r = ((op & 0x200) >> 5) | (op & 0x0F);
+        uint8_t res = c->R[d] | c->R[r];
+        c->R[d] = res;
+        flags_logic(c, res);
+        c->cycles += 1;
+    }
+    else if ((op & 0xFC00) == 0x2C00) /* Added per Section 6: MOV – Copy Register */
+    {
+        uint8_t d = (op >> 4) & 0x1F, r = ((op & 0x200) >> 5) | (op & 0x0F);
+        c->R[d] = c->R[r];
+        c->cycles += 1;
+    }
+    else if ((op & 0xF000) == 0x3000) /* Added per Section 6: CPI – Compare with Immediate */
+    {
+        int d = 16 + ((op >> 4) & 0x0F);
+        uint8_t K = ((op >> 4) & 0xF0) | (op & 0x0F);
+        uint8_t a = c->R[d];
+        uint16_t r = (uint16_t)a - (uint16_t)K;
+        flags_sub(c, a, K, r, 0);
+        c->cycles += 1;
+    }
+    else if ((op & 0xFC00) == 0x1400) /* Added per Section 6: CP – Compare */
+    {
+        uint8_t d = (op >> 4) & 0x1F, r = ((op & 0x200) >> 5) | (op & 0x0F);
+        uint8_t a = c->R[d], b = c->R[r];
+        uint16_t res = (uint16_t)a - (uint16_t)b;
+        flags_sub(c, a, b, res, 0);
+        c->cycles += 1;
+    }
+    else if ((op & 0xFC00) == 0x0400) /* Added per Section 6: CPC – Compare with Carry */
+    {
+        uint8_t d = (op >> 4) & 0x1F, r = ((op & 0x200) >> 5) | (op & 0x0F);
+        uint8_t a = c->R[d], b = c->R[r], cin = GETBIT(c->sreg, F_C);
+        uint16_t res = (uint16_t)a - (uint16_t)b - cin;
+        flags_sub(c, a, b, res, cin);
         c->cycles += 1;
     }
 
@@ -560,7 +618,7 @@ static void avr_step(avr_t *c)
     /* ------------------- Bit‐manipulation instructions ------------------- */
 
     /* CBI – Clear Bit in I/O Register */
-    else if ((op & 0xF000) == 0x9000 && (op & 0x0E00) == 0x0800) /* Added per Section 6: CBI */
+    else if ((op & 0xFF00) == 0x9800) /* Added per Section 6: CBI */
     {
         uint8_t A = (op >> 3) & 0x1F, b = op & 0x07;
         uint32_t addr = 0x20 + A; /* I/O space starts at data addr 0x20 */
@@ -570,7 +628,7 @@ static void avr_step(avr_t *c)
     }
 
     /* SBI – Set Bit in I/O Register */
-    else if ((op & 0xF000) == 0x9000 && (op & 0x0E00) == 0x0A00) /* Added per Section 6: SBI */
+    else if ((op & 0xFF00) == 0x9A00) /* Added per Section 6: SBI */
     {
         uint8_t A = (op >> 3) & 0x1F, b = op & 0x07;
         uint32_t addr = 0x20 + A;
@@ -580,7 +638,7 @@ static void avr_step(avr_t *c)
     }
 
     /* SBIC – Skip if Bit in I/O Register is Cleared */
-    else if ((op & 0xF000) == 0x9000 && (op & 0x0E00) == 0x0800) /* Added per Section 6: SBIC */
+    else if ((op & 0xFF00) == 0x9900) /* Added per Section 6: SBIC */
     {
         uint8_t A = (op >> 3) & 0x1F, b = op & 0x07;
         uint32_t addr = 0x20 + A;
@@ -597,7 +655,7 @@ static void avr_step(avr_t *c)
     }
 
     /* SBIS – Skip if Bit in I/O Register is Set */
-    else if ((op & 0xF000) == 0x9000 && (op & 0x0F00) == 0x0B00) /* Added per Section 6: SBIS */
+    else if ((op & 0xFF00) == 0x9B00) /* Added per Section 6: SBIS */
     {
         uint8_t A = (op >> 3) & 0x1F, b = op & 0x07;
         uint32_t addr = 0x20 + A;
@@ -614,7 +672,7 @@ static void avr_step(avr_t *c)
     }
 
     /* SBRC – Skip if Bit in Register is Cleared */
-    else if ((op & 0xFC08) == 0xFC00) /* Added per Section 6: SBRC */
+    else if ((op & 0xFE08) == 0xFC00) /* Added per Section 6: SBRC */
     {
         uint8_t r = ((op & 0x0200) >> 5) | (op & 0x0F);
         uint8_t b = op & 0x07;
@@ -631,7 +689,7 @@ static void avr_step(avr_t *c)
     }
 
     /* SBRS – Skip if Bit in Register is Set */
-    else if ((op & 0xFC08) == 0xFC08) /* Added per Section 6: SBRS */
+    else if ((op & 0xFE08) == 0xFE00) /* Added per Section 6: SBRS */
     {
         uint8_t r = ((op & 0x0200) >> 5) | (op & 0x0F);
         uint8_t b = op & 0x07;
@@ -648,7 +706,7 @@ static void avr_step(avr_t *c)
     }
 
     /* BLD – Bit Load from T to Register */
-    else if ((op & 0xF808) == 0xF000) /* Added per Section 6: BLD */
+    else if ((op & 0xFE08) == 0xF800) /* Added per Section 6: BLD */
     {
         uint8_t d = (op >> 4) & 0x1F, b = op & 0x07;
         if (GETBIT(c->sreg, F_T))
@@ -659,7 +717,7 @@ static void avr_step(avr_t *c)
     }
 
     /* BST – Bit Store from Register to T */
-    else if ((op & 0xF808) == 0xF800) /* Added per Section 6: BST */
+    else if ((op & 0xFE08) == 0xFA00) /* Added per Section 6: BST */
     {
         uint8_t d = (op >> 4) & 0x1F, b = op & 0x07;
         if (c->R[d] & (1u << b))
@@ -670,7 +728,7 @@ static void avr_step(avr_t *c)
     }
 
     /* BSET – Set Flag in SREG */
-   else if ((op & 0xFF0F) == 0x9408) /* Added per Section 6: BSET */
+   else if ((op & 0xFF8F) == 0x9408) /* Added per Section 6: BSET */
     {
         uint8_t s = (op >> 4) & 0x07;
         SETBIT(c->sreg, s);
@@ -678,7 +736,7 @@ static void avr_step(avr_t *c)
     }
 
     /* BCLR – Clear Flag in SREG */
-    else if ((op & 0xFF0F) == 0x9488) /* Added per Section 6: BCLR */
+    else if ((op & 0xFF8F) == 0x9488) /* Added per Section 6: BCLR */
     {
         uint8_t s = (op >> 4) & 0x07;
         CLRBIT(c->sreg, s);
@@ -686,6 +744,30 @@ static void avr_step(avr_t *c)
     }
 
     /* ------------------- Control‐flow instructions ------------------- */
+
+    /* JMP – Long Jump */
+    else if ((op & 0xFE0E) == 0x940C) /* Added per Section 6: JMP */
+    {
+        uint16_t op2 = flash_word(c, cur_pc + 2);
+        uint32_t k =
+            ((op & 0x0100) << 13)   /* K21 = bit8→bit21 */
+            | ((op & 0x00F0) << 13) /* K20..17 = bits7..4→bits20..17 */ 
+            | ((op & 0x0001) << 16) /* K16 = bit0→bit16 */
+            | (uint32_t)op2;        /* K15..0 from second word */
+        c->pc = k << 1;
+        c->cycles += 3;
+    }
+
+    /* CALL – Long Call to Subroutine */
+    else if ((op & 0xFE0E) == 0x940E) /* Added per Section 6: CALL */
+    {
+        uint16_t op2 = flash_word(c, cur_pc + 2);
+        uint32_t k =
+            ((op & 0x0100) << 13) | ((op & 0x00F0) << 13) | ((op & 0x0001) << 16) | (uint32_t)op2;
+        push16(c, cur_pc + 4);
+        c->pc = k << 1;
+        c->cycles += 4;
+    }
 
     /* RJMP – Relative Jump */
     else if ((op & 0xF000) == 0xC000) /* Added per Section 6: RJMP */
@@ -708,6 +790,38 @@ static void avr_step(avr_t *c)
         c->cycles += 3;
     }
 
+    /* ------------------- Branch instructions ------------------- */
+    else if ((op & 0xFC00) == 0xF000) /* Added per Section 6: BRBS – Branch if Status Flag Set */
+    {
+        uint8_t s = op & 0x07;
+        int8_t k = (op >> 3) & 0x7F;
+        if (k & 0x40) k |= 0x80; /* sign extend 7-bit */
+        if (GETBIT(c->sreg, s))
+        {
+            c->pc = cur_pc + 2 + (k << 1);
+            c->cycles += 2;
+        }
+        else
+        {
+            c->cycles += 1;
+        }
+    }
+    else if ((op & 0xFC00) == 0xF400) /* Added per Section 6: BRBC – Branch if Status Flag Cleared */
+    {
+        uint8_t s = op & 0x07;
+        int8_t k = (op >> 3) & 0x7F;
+        if (k & 0x40) k |= 0x80; /* sign extend 7-bit */
+        if (!GETBIT(c->sreg, s))
+        {
+            c->pc = cur_pc + 2 + (k << 1);
+            c->cycles += 2;
+        }
+        else
+        {
+            c->cycles += 1;
+        }
+    }
+
     /* IJMP – Indirect Jump (Z) */
     else if (op == 0x9409) /* Added per Section 6: IJMP */
     {
@@ -722,30 +836,6 @@ static void avr_step(avr_t *c)
         uint32_t z = (uint32_t)c->R[30] | ((uint32_t)c->R[31] << 8) | ((uint32_t)c->eind << 16);
         c->pc = z << 1;
         c->cycles += 2;
-    }
-
-    /* JMP – Long Jump */
-    else if ((op & 0xFE0E) == 0x9406) /* Added per Section 6: JMP */
-    {
-        uint16_t op2 = flash_word(c, cur_pc + 2);
-        uint32_t k =
-            ((op & 0x0100) << 13)   /* K21 = bit8→bit21 */
-            | ((op & 0x00F0) << 17) /* K20..17 = bits7..4→bits20..17 */
-            | ((op & 0x0001) << 16) /* K16 = bit0→bit16 */
-            | (uint32_t)op2;        /* K15..0 from second word */
-        c->pc = k << 1;
-        c->cycles += 3;
-    }
-
-    /* CALL – Long Call to Subroutine */
-    else if ((op & 0xFE0E) == 0x940E) /* Added per Section 6: CALL */
-    {
-        uint16_t op2 = flash_word(c, cur_pc + 2);
-        uint32_t k =
-            ((op & 0x0100) << 13) | ((op & 0x00F0) << 17) | ((op & 0x0001) << 16) | (uint32_t)op2;
-        push16(c, cur_pc + 2);
-        c->pc = k << 1;
-        c->cycles += 4;
     }
 
     /* ICALL – Indirect Call to Subroutine (Z) */
@@ -797,25 +887,27 @@ static void avr_step(avr_t *c)
     }
 
     /* LDS – Load Direct from Data Space */
-    else if ((op & 0xF800) == 0x9000)
+    else if ((op & 0xFE0F) == 0x9000)
     { /* Added per Section 6: LDS */
         uint8_t d = (op >> 4) & 0x1F;
-        uint16_t addr = flash_word(c, cur_pc); /* immediate follows */
+        uint16_t addr = flash_word(c, cur_pc + 2); /* immediate follows */
         c->R[d] = read_data(c, addr);
+        c->pc += 2;
         c->cycles += 2;
     }
 
     /* STS – Store Direct to Data Space */
-    else if ((op & 0xF800) == 0x9200)
+    else if ((op & 0xFE0F) == 0x9200)
     { /* Added per Section 6: STS */
         uint8_t r = (op >> 4) & 0x1F;
-        uint16_t addr = flash_word(c, cur_pc);
+        uint16_t addr = flash_word(c, cur_pc + 2);
         write_data(c, addr, c->R[r]);
+        c->pc += 2;
         c->cycles += 2;
     }
 
     /* LD Rd, X – Load Indirect using X */
-    else if ((op & 0xFC0F) == 0x900C)
+    else if ((op & 0xFE0F) == 0x900C)
     { /* Added per Section 6: LD Rd,X */
         uint8_t d = (op >> 4) & 0x1F;
         uint16_t addr = (uint16_t)c->R[27] << 8 | c->R[26];
@@ -823,7 +915,7 @@ static void avr_step(avr_t *c)
         c->cycles += 2;
     }
     /* LD Rd, X+ – Load Indirect + Post‐increment X */
-    else if ((op & 0xFC0F) == 0x900D)
+    else if ((op & 0xFE0F) == 0x900D)
     { /* Added per Section 6: LD Rd,X+ */
         uint8_t d = (op >> 4) & 0x1F;
         uint16_t addr = (uint16_t)c->R[27] << 8 | c->R[26];
@@ -834,7 +926,7 @@ static void avr_step(avr_t *c)
         c->cycles += 2;
     }
     /* LD Rd, –X – Load Indirect + Pre-decrement X */
-    else if ((op & 0xFC0F) == 0x900E)
+    else if ((op & 0xFE0F) == 0x900E)
     { /* Added per Section 6: LD Rd,–X */
         uint8_t d = (op >> 4) & 0x1F;
         uint16_t addr = (uint16_t)c->R[27] << 8 | c->R[26];
@@ -846,7 +938,7 @@ static void avr_step(avr_t *c)
     }
 
     /* ST X, Rd – Store Indirect using X */
-    else if ((op & 0xFC0F) == 0x920C)
+    else if ((op & 0xFE0F) == 0x920C)
     { /* Added per Section 6: ST X,Rd */
         uint8_t r = (op >> 4) & 0x1F;
         uint16_t addr = (uint16_t)c->R[27] << 8 | c->R[26];
@@ -854,7 +946,7 @@ static void avr_step(avr_t *c)
         c->cycles += 2;
     }
     /* ST X+, Rd – Store Indirect + Post‐increment X */
-    else if ((op & 0xFC0F) == 0x920D)
+    else if ((op & 0xFE0F) == 0x920D)
     { /* Added per Section 6: ST X+,Rd */
         uint8_t r = (op >> 4) & 0x1F;
         uint16_t addr = (uint16_t)c->R[27] << 8 | c->R[26];
@@ -865,7 +957,7 @@ static void avr_step(avr_t *c)
         c->cycles += 2;
     }
     /* ST –X, Rd – Store Indirect + Pre-decrement X */
-    else if ((op & 0xFC0F) == 0x920E)
+    else if ((op & 0xFE0F) == 0x920E)
     { /* Added per Section 6: ST –X,Rd */
         uint8_t r = (op >> 4) & 0x1F;
         uint16_t addr = (uint16_t)c->R[27] << 8 | c->R[26];
@@ -877,7 +969,7 @@ static void avr_step(avr_t *c)
     }
 
     /* LD Rd, Y – Load Indirect using Y */
-    else if ((op & 0xFC0F) == 0x8008)
+    else if ((op & 0xFE0F) == 0x8008)
     { /* Added per Section 6: LD Rd,Y */
         uint8_t d = (op >> 4) & 0x1F;
         uint16_t addr = (uint16_t)c->R[29] << 8 | c->R[28];
@@ -885,7 +977,7 @@ static void avr_step(avr_t *c)
         c->cycles += 2;
     }
     /* LD Rd, Y+ – Load Indirect + Post‐increment Y */
-    else if ((op & 0xFC0F) == 0x9009)
+    else if ((op & 0xFE0F) == 0x9009)
     { /* Added per Section 6: LD Rd,Y+ */
         uint8_t d = (op >> 4) & 0x1F;
         uint16_t addr = (uint16_t)c->R[29] << 8 | c->R[28];
@@ -896,7 +988,7 @@ static void avr_step(avr_t *c)
         c->cycles += 2;
     }
     /* LD Rd, –Y – Load Indirect + Pre-decrement Y */
-    else if ((op & 0xFC0F) == 0x900A)
+    else if ((op & 0xFE0F) == 0x900A)
     { /* Added per Section 6: LD Rd,–Y */
         uint8_t d = (op >> 4) & 0x1F;
         uint16_t addr = (uint16_t)c->R[29] << 8 | c->R[28];
@@ -908,7 +1000,7 @@ static void avr_step(avr_t *c)
     }
 
     /* ST Y, Rd – Store Indirect using Y */
-    else if ((op & 0xFC0F) == 0x8208)
+    else if ((op & 0xFE0F) == 0x8208)
     { /* Added per Section 6: ST Y,Rd */
         uint8_t r = (op >> 4) & 0x1F;
         uint16_t addr = (uint16_t)c->R[29] << 8 | c->R[28];
@@ -916,7 +1008,7 @@ static void avr_step(avr_t *c)
         c->cycles += 2;
     }
     /* ST Y+, Rd – Store Indirect + Post‐increment Y */
-    else if ((op & 0xFC0F) == 0x9209)
+    else if ((op & 0xFE0F) == 0x9209)
     { /* Added per Section 6: ST Y+,Rd */
         uint8_t r = (op >> 4) & 0x1F;
         uint16_t addr = (uint16_t)c->R[29] << 8 | c->R[28];
@@ -927,7 +1019,7 @@ static void avr_step(avr_t *c)
         c->cycles += 2;
     }
     /* ST –Y, Rd – Store Indirect + Pre-decrement Y */
-    else if ((op & 0xFC0F) == 0x920A)
+    else if ((op & 0xFE0F) == 0x920A)
     { /* Added per Section 6: ST –Y,Rd */
         uint8_t r = (op >> 4) & 0x1F;
         uint16_t addr = (uint16_t)c->R[29] << 8 | c->R[28];
@@ -939,7 +1031,7 @@ static void avr_step(avr_t *c)
     }
 
     /* LD Rd, Z – Load Indirect using Z */
-    else if ((op & 0xFC0F) == 0x8000)
+    else if ((op & 0xFE0F) == 0x8000)
     { /* Added per Section 6: LD Rd,Z */
         uint8_t d = (op >> 4) & 0x1F;
         uint32_t addr = (uint16_t)c->R[31] << 8 | c->R[30];
@@ -947,7 +1039,7 @@ static void avr_step(avr_t *c)
         c->cycles += 2;
     }
     /* LD Rd, Z+ – Load Indirect + Post‐increment Z */
-    else if ((op & 0xFC0F) == 0x9001)
+    else if ((op & 0xFE0F) == 0x9001)
     { /* Added per Section 6: LD Rd,Z+ */
         uint8_t d = (op >> 4) & 0x1F;
         uint32_t addr = (uint16_t)c->R[31] << 8 | c->R[30];
@@ -958,7 +1050,7 @@ static void avr_step(avr_t *c)
         c->cycles += 2;
     }
     /* LD Rd, –Z – Load Indirect + Pre-decrement Z */
-    else if ((op & 0xFC0F) == 0x9002)
+    else if ((op & 0xFE0F) == 0x9002)
     { /* Added per Section 6: LD Rd,–Z */
         uint8_t d = (op >> 4) & 0x1F;
         uint32_t addr = (uint16_t)c->R[31] << 8 | c->R[30];
@@ -970,7 +1062,7 @@ static void avr_step(avr_t *c)
     }
 
     /* ST Z, Rd – Store Indirect using Z */
-    else if ((op & 0xFC0F) == 0x8200)
+   else if ((op & 0xFE0F) == 0x8200)
     { /* Added per Section 6: ST Z,Rd */
         uint8_t r = (op >> 4) & 0x1F;
         uint32_t addr = (uint16_t)c->R[31] << 8 | c->R[30];
@@ -978,7 +1070,7 @@ static void avr_step(avr_t *c)
         c->cycles += 2;
     }
     /* ST Z+, Rd – Store Indirect + Post‐increment Z */
-    else if ((op & 0xFC0F) == 0x9201)
+    else if ((op & 0xFE0F) == 0x9201)
     { /* Added per Section 6: ST Z+,Rd */
         uint8_t r = (op >> 4) & 0x1F;
         uint32_t addr = (uint16_t)c->R[31] << 8 | c->R[30];
@@ -989,7 +1081,7 @@ static void avr_step(avr_t *c)
         c->cycles += 2;
     }
     /* ST –Z, Rd – Store Indirect + Pre-decrement Z */
-    else if ((op & 0xFC0F) == 0x9202)
+    else if ((op & 0xFE0F) == 0x9202)
     { /* Added per Section 6: ST –Z,Rd */
         uint8_t r = (op >> 4) & 0x1F;
         uint32_t addr = (uint16_t)c->R[31] << 8 | c->R[30];
@@ -1001,10 +1093,10 @@ static void avr_step(avr_t *c)
     }
 
     /* IN – Load from I/O Location        */
-    else if ((op & 0xF600) == 0xB000)
+    else if ((op & 0xF800) == 0xB000)
     { /* Added per Section 6: IN */
         uint8_t d = (op >> 4) & 0x1F;
-        uint8_t A = op & 0x3F;
+        uint8_t A = ((op >> 5) & 0x30) | (op & 0x0F);
         c->R[d] = read_data(c, 0x20 + A);
         c->cycles += 1;
     }
@@ -1012,9 +1104,8 @@ static void avr_step(avr_t *c)
     /* OUT – Store to I/O Location        */
     else if ((op & 0xF800) == 0xB800)
     { /* Added per Section 6: OUT */
-        // uint8_t A = (op >> 4) & 0x0F | ((op >> 5) & 0x30);
-        uint8_t A = ((op >> 4) & 0x0F) | ((op >> 5) & 0x30);
-        uint8_t r = op & 0x1F;
+        uint8_t A = ((op >> 5) & 0x30) | (op & 0x0F);
+        uint8_t r = (op >> 4) & 0x1F;
         write_data(c, 0x20 + A, c->R[r]);
         c->cycles += 1;
     }
@@ -1028,7 +1119,7 @@ static void avr_step(avr_t *c)
         /* LSb selects low versus high—but full low‐level support is complex */
         c->cycles += 3;
     }
-    else if ((op & 0xF006) == 0x9004)
+    else if ((op & 0xFE0F) == 0x9004)
     { /* Added per Section 6: LPM Rd,Z */
         uint8_t d = (op >> 4) & 0x1F;
         uint32_t addr = ((uint16_t)c->R[31] << 8 | c->R[30]);
@@ -1096,6 +1187,7 @@ static void avr_step(avr_t *c)
         c->running = 0;
     }
 }
+
 
 /*--------------------------------------------------------------------
   Intel-HEX loader
