@@ -85,7 +85,8 @@ static void push8(avr_t *, uint8_t);
 static uint8_t pop8(avr_t *);
 static void push16(avr_t *, uint16_t);
 static uint16_t pop16(avr_t *);
-
+static void disasm(avr_t *c, uint32_t pc);
+static void dump_regs(avr_t *c);
 /* Flag bits in SREG */
 enum
 {
@@ -264,6 +265,8 @@ static void avr_step(avr_t *c)
     uint16_t op     = flash_word(c, cur_pc);
     c->pc          += 2;              /* PC aponta para a próxima palavra    */
 
+ 
+    dump_regs(c);
 /* ==================== ARITHMETIC INSTRUCTIONS ==================== */
 
     /* ADD  – 0000 11rd dddd rrrr (mask 0xFC00 == 0x0C00) */
@@ -1030,18 +1033,35 @@ static void disasm(avr_t *c, uint32_t pc)
 /*--------------------------------------------------------------------
   Monitor helpers
  --------------------------------------------------------------------*/
-static void dump_regs(avr_t *c)
+static void dump_regs(avr_t *c) 
 {
-    int i;
-    for (i = 0; i < 32; i++)
+    // 1. General-Purpose Registers (R0-R31) - 8-bit values
+    printf("Registers:\n");
+    for (int i = 0; i < 32; i++) 
     {
-        printf("R%02d=%02X%c", i, c->R[i], (i % 8 == 7) ? '\n' : ' ');
+        printf("R%-2d = 0x%02X", i, c->R[i]);
+        if (i % 4 == 3) printf("\n");  // 4 registers per line
+        else printf(" | ");
     }
-    printf("PC=%06lX  SP=%04X  SREG=%02X  CYC=%llu\n",
-           (unsigned long)c->pc, c->sp, c->sreg, (unsigned long long)c->cycles);
 
+    // 2. Special Registers (PC, SP, SREG)
+    printf("\nProcessor State:\n");
+    printf("PC   = 0x%06lX  (Next instruction)\n", (unsigned long)c->pc);
+    printf("SP   = 0x%04X  (Stack Pointer)\n", c->sp);
+    printf("SREG = 0x%02X  [", c->sreg);
 
-    disasm(c, (unsigned long)c->pc);
+    // 3. SREG Flags (bit-by-bit breakdown)
+    printf("%c%c%c%c%c%c%c%c]  ",
+           (c->sreg & 0x80) ? 'I' : '-',  // Global Interrupt
+           (c->sreg & 0x40) ? 'T' : '-',  // Bit Copy Storage
+           (c->sreg & 0x20) ? 'H' : '-',  // Half Carry
+           (c->sreg & 0x10) ? 'S' : '-',  // Sign
+           (c->sreg & 0x08) ? 'V' : '-',  // Overflow
+           (c->sreg & 0x04) ? 'N' : '-',  // Negative
+           (c->sreg & 0x02) ? 'Z' : '-',  // Zero
+           (c->sreg & 0x01) ? 'C' : '-'); // Carry
+
+    printf("\nCycles = %llu\n", (unsigned long long)c->cycles);
 }
 
 /*--------------------------------------------------------------------
