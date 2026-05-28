@@ -1,8 +1,6 @@
 # AVR-VM
 
-**For: ATmega1284-Class Devices**
-**Target: AVR-VM Simulation (`avr_vm.c`)**
-**Document Version:** 1.0 (2025-11)
+**An 8-bit AVR CPU core emulator written in C.**
 **Author:** Isak Ruas
 **License:** Apache License 2.0
 
@@ -10,204 +8,233 @@
 
 ## 1. Overview
 
-This manual describes the instruction set implemented by the `AVR-VM` simulator (`avr_vm.c`). The VM is a C89-compatible core emulator for the 8-bit AVR ISA, targeting a device class similar to the ATmega1284.
+AVR-VM is a software emulator of the 8-bit AVR CPU core (AVRe / AVRe+ /
+AVRxm / AVRxt class). It decodes and executes AVR-8 machine code loaded
+from standard Intel `.hex` files and models the register file, status
+flags, and instruction cycle counts.
 
-It is designed to execute AVR-8 machine code loaded from standard Intel `.hex` files.
+The decoder implements AVR instruction groups including pointer-based
+loads/stores, the multiply family, program-memory access
+(`LPM`/`ELPM`/`SPM`), indirect jumps/calls, the XMEGA atomic
+read-modify-write instructions, and the XMEGA `DES` round.
 
-**Build:**
+### Project layout
+
+| Path | Purpose |
+| :--- | :--- |
+| `src/avr_core.h` | Public API and core data structures (`avr_t`, flags, memory map). |
+| `src/avr_core.c` | Instruction decoder and execution engine. |
+| `src/main.c` | Command-line driver: loads a `.hex` file and runs it. |
+| `tests/test_*.c` | C unit tests, one binary per instruction group. |
+| `tests/test_*.asm` | Self-checking AVR assembly programs run end-to-end in the VM. |
+| `tests/test_common.h` | Shared assertion harness for the C tests. |
+| `Makefile` | Builds the CLI, the core library object, and the test binaries. |
+
+---
+
+## 2. Building and running
+
 ```bash
-gcc -std=c89 -Wall -O2 avr_vm.c -o avr_vm
-````
-
-**Run:**
-
-```bash
-./avr_vm <file.hex> [options]
+make all      # build bin/avr_vm and the core object
+make test     # run both the C and the assembly test suites
+make test-c   # build and run only the C tests (tests/test_*.c)
+make test-asm # assemble and run only the assembly tests (tests/test_*.asm)
+make clean    # remove build artifacts
 ```
 
------
+The assembly suite requires the `avr-gcc` toolchain (`avr-gcc`,
+`avr-objcopy`) to assemble `tests/test_*.asm` into `.hex` images.
 
-## 2\. CPU Architecture & Memory
+Run a program:
 
-The VM emulates the following core architecture:
+```bash
+./bin/avr_vm <file.hex> [options]
+```
 
-  * **General Purpose Registers:** 32 8-bit registers (R0–R31).
-  * **Program Counter (PC):** 22-bit effective address (emulated as `uint32_t`), pointing to byte addresses in Flash.
-  * **Stack Pointer (SP):** 16-bit stack pointer (`uint16_t`) that descends from the top of internal SRAM.
-  * **Status Register (SREG):** 8-bit flag register.
-  * **Program Memory (Flash):** 128 Kwords (256 KB)
-  * **Data Memory (SRAM):** 16 KB
-  * **EEPROM:** 4 KB *(Note: Memory is allocated, but no EEPROM access instructions are currently implemented.)*
-  * **I/O Space:** 256 bytes (accessible via `IN`/`OUT` and memory-mapped)
+| Option | Effect |
+| :--- | :--- |
+| `-t` | Trace: print each instruction as it executes. |
+| `-n MAX` | Stop after `MAX` instructions (default: run until halt). |
+| `-d` | Dump the register file and SREG at exit. |
 
------
+The CLI exit code is `0` on normal completion and `2` if the core halted
+on an unknown opcode.
 
-## 3\. Data Memory Map
+---
 
-The `avr_vm` implements a unified data address space. All data access (except for program flash) is handled by the `read_data` and `write_data` functions.
+## 3. CPU architecture and memory
 
-| Address Range | Size | Description |
+  * **General-purpose registers:** 32 8-bit registers, R0–R31.
+  * **Program counter (PC):** byte address into flash, held as `uint32_t`
+    (instructions are 16-bit words, so the PC is always even).
+  * **Stack pointer (SP):** 16-bit, initialized to the top of SRAM
+    (`AVR_SRAM_START + AVR_SRAM_BYTES - 1`). Push post-decrements, pop
+    pre-increments.
+  * **Status register (SREG):** 8 flag bits (see §5).
+  * **Program memory (flash):** 256 KB (128 Kwords).
+  * **Data memory (SRAM):** 16 KB.
+  * **EEPROM:** 4 KB allocated (see limitations in §7).
+  * **I/O space:** 256 bytes, reachable through `IN`/`OUT` and the unified
+    data map.
+  * **Extended addressing:** `RAMPX`, `RAMPY`, `RAMPZ` extend the X/Y/Z
+    pointers; `RAMPZ` extends `ELPM`; `EIND` extends `EICALL`/`EIJMP`.
+
+---
+
+## 4. Data memory map
+
+All data access (everything except program flash) goes through
+`avr_read_data` / `avr_write_data` over a single unified address space:
+
+| Address range | Size | Description |
 | :--- | :--- | :--- |
-| `0x0000 - 0x001F` | 32 Bytes | **Register File** (R0–R31) |
-| `0x0020 - 0x00FF` | 224 Bytes | **I/O Register Space** |
-| `0x0100 - 0x40FF` | 16 KB | **Internal SRAM** |
+| `0x0000 – 0x001F` | 32 B | Register file (R0–R31) |
+| `0x0020 – 0x00FF` | 224 B | I/O register space |
+| `0x0100 – 0x40FF` | 16 KB | Internal SRAM |
 
-The Stack Pointer (`sp`) is initialized to the top of SRAM: `0x40FF`.
+---
 
------
-
-## 4\. Status Register (SREG)
+## 5. Status register (SREG)
 
 | Bit | 7 | 6 | 5 | 4 | 3 | 2 | 1 | 0 |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **Flag** | **I** | **T** | **H** | **S** | **V** | **N** | **Z** | **C** |
-| **Bit (enum)** | `F_I` | `F_T` | `F_H` | `F_S` | `F_V` | `F_N` | `F_Z` | `F_C` |
+| **Flag** | I | T | H | S | V | N | Z | C |
+| **enum** | `F_I` | `F_T` | `F_H` | `F_S` | `F_V` | `F_N` | `F_Z` | `F_C` |
 
-  * **I:** Global Interrupt Enable
-  * **T:** Bit Copy Storage (`BST`/`BLD`)
-  * **H:** Half-carry Flag
-  * **S:** Sign Flag (N ⊕ V)
-  * **V:** Two's Complement Overflow
-  * **N:** Negative Flag
-  * **Z:** Zero Flag
-  * **C:** Carry Flag
+  * **I** – global interrupt enable
+  * **T** – bit copy storage (`BST`/`BLD`)
+  * **H** – half-carry
+  * **S** – sign (N ⊕ V)
+  * **V** – two's complement overflow
+  * **N** – negative
+  * **Z** – zero
+  * **C** – carry
 
------
+---
 
-## 5\. Implemented Instruction Set
+## 6. Implemented instruction set
 
-This section details all instructions currently implemented in `avr_vm.c`.
+### 6.1 Arithmetic and logic
 
-### 5.1. Arithmetic and Logic Instructions
+| Mnemonic | Description |
+| :--- | :--- |
+| `ADD` / `ADC` | Add without / with carry |
+| `ADIW` | Add immediate to word (R24/26/28/30) |
+| `SUB` / `SBC` | Subtract without / with carry |
+| `SUBI` / `SBCI` | Subtract immediate without / with carry |
+| `SBIW` | Subtract immediate from word |
+| `AND` / `ANDI` | Logical AND, register / immediate |
+| `OR` / `ORI` | Logical OR, register / immediate |
+| `EOR` | Exclusive OR |
+| `COM` | One's complement |
+| `NEG` | Two's complement negate |
+| `INC` / `DEC` | Increment / decrement |
+| `MUL` / `MULS` / `MULSU` | 8×8 multiply: unsigned / signed / signed·unsigned |
+| `FMUL` / `FMULS` / `FMULSU` | Fractional multiply variants |
 
-| Mnemonic | Description | Opcode Mask | Cycles | Flags |
-| :--- | :--- | :--- | :--- | :--- |
-| `ADD` | Add without Carry | `0x0C00` | 1 | C,Z,N,V,S,H |
-| `ADC` | Add with Carry | `0x1C00` | 1 | C,Z,N,V,S,H |
-| `SUB` | Subtract without Carry | `0x1800` | 1 | C,Z,N,V,S,H |
-| `SBC` | Subtract with Carry | `0x0800` | 1 | C,Z,N,V,S,H |
-| `AND` | Logical AND | `0x2000` | 1 | Z,N,V,S |
-| `OR` | Logical OR | `0x2800` | 1 | Z,N,V,S |
-| `EOR` | Exclusive OR | `0x2400` | 1 | Z,N,V,S |
-| `ANDI` | AND with Immediate | `0x7000` | 1 | Z,N,V,S |
-| `ORI` | OR with Immediate | `0x6000` | 1 | Z,N,V,S |
-| `INC` | Increment | `0x9403` | 1 | Z,N,V,S |
-| `DEC` | Decrement | `0x940A` | 1 | Z,N,V,S |
-| `NEG` | Two's Complement Negate | `0x9401` | 1 | C,Z,N,V,S,H |
-| `COM` | One's Complement | `0x9400` | 1 | C,Z,N,V,S |
+Common assembler aliases map onto these encodings: `TST`→`AND Rd,Rd`,
+`CLR`→`EOR Rd,Rd`, `SBR`→`ORI`, `CBR`→`ANDI`, `SER`→`LDI Rd,0xFF`,
+`ROL`→`ADC Rd,Rd`, `LSL`→`ADD Rd,Rd`.
 
-**Aliases:**
+### 6.2 Branch, jump, and call
 
-  * `TST Rd` is implemented as `AND Rd, Rd`.
-  * `CLR Rd` is implemented as `EOR Rd, Rd`.
-  * `SBR Rd, K` is implemented as `ORI Rd, K`.
-  * `CBR Rd, K` is implemented as `ANDI Rd, 0xFF-K`.
+| Mnemonic | Description |
+| :--- | :--- |
+| `RJMP` / `IJMP` / `EIJMP` | Relative / indirect (Z) / extended indirect jump |
+| `JMP` | Absolute 22-bit jump |
+| `RCALL` / `ICALL` / `EICALL` | Relative / indirect / extended indirect call |
+| `CALL` | Absolute 22-bit call |
+| `RET` / `RETI` | Return from subroutine / interrupt |
+| `CP` / `CPC` / `CPI` | Compare, with carry, with immediate |
+| `CPSE` | Compare and skip if equal |
+| `SBRC` / `SBRS` | Skip if register bit clear / set |
+| `SBIC` / `SBIS` | Skip if I/O bit clear / set |
+| `BRBS` / `BRBC` | Branch if SREG bit set / clear |
 
-### 5.2. Branch Instructions
+`BRBS`/`BRBC` cover the named conditional branches (`BREQ`, `BRNE`,
+`BRCS`, `BRCC`, `BRGE`, `BRLT`, etc.), which select a specific SREG bit.
 
-| Mnemonic | Description | Opcode Mask | Cycles | Flags |
-| :--- | :--- | :--- | :--- | :--- |
-| `RJMP` | Relative Jump (±2K words) | `0xC000` | 2 | - |
-| `JMP` | Absolute Jump (22-bit) | `0x940C` | 3 | - |
-| `RCALL` | Relative Call (±2K words) | `0xD000` | 3 | - |
-| `CALL` | Absolute Call (22-bit) | `0x940E` | 4 | - |
-| `RET` | Return from Subroutine | `0x9508` | 4 | - |
-| `RETI` | Return from Interrupt | `0x9518` | 4 | I |
-| `BRBS` | Branch if SREG Bit Set | `0xF000` | 1/2 | - |
-| `BRBC` | Branch if SREG Bit Clear | `0xF400` | 1/2 | - |
+### 6.3 Data transfer
 
-### 5.3. Data Transfer Instructions
+| Mnemonic | Description |
+| :--- | :--- |
+| `MOV` / `MOVW` | Copy register / register pair |
+| `LDI` | Load immediate (R16–R31) |
+| `LD` / `ST` | Indirect load/store via X, Y, Z (with post-inc / pre-dec) |
+| `LDD` / `STD` | Load/store with displacement, Y+q / Z+q |
+| `LDS` / `STS` | Direct load/store, data space (16-bit address) |
+| `LPM` / `ELPM` | Load from program memory (Z, extended via RAMPZ) |
+| `SPM` | Store to program memory |
+| `IN` / `OUT` | Read / write I/O register |
+| `PUSH` / `POP` | Stack push / pop |
+| `XCH` / `LAS` / `LAC` / `LAT` | XMEGA atomic read-modify-write on (Z) |
 
-| Mnemonic | Description | Opcode Mask | Cycles | Flags |
-| :--- | :--- | :--- | :--- | :--- |
-| `MOV` | Copy Register | `0x2C00` | 1 | - |
-| `MOVW` | Copy Register Pair | `0x0100` | 1 | - |
-| `LDI` | Load Immediate (R16-R31) | `0xE000` | 1 | - |
-| `LDS` | Load Direct from Data Space | `0x9000` | 2 | - |
-| `STS` | Store Direct to Data Space | `0x9200` | 2 | - |
-| `PUSH` | Push Register on Stack | `0x920F` | 2 | - |
-| `POP` | Pop Register from Stack | `0x900F` | 2 | - |
-| `IN` | In from I/O Location | `0xB000` | 1 | - |
-| `OUT` | Out to I/O Location | `0xB800` | 1 | - |
+### 6.4 Bit and bit-test
 
-**Aliases:**
+| Mnemonic | Description |
+| :--- | :--- |
+| `LSR` / `ROR` / `ASR` | Logical / rotate-through-carry / arithmetic shift right |
+| `SWAP` | Swap nibbles |
+| `SBI` / `CBI` | Set / clear bit in I/O register |
+| `BST` / `BLD` | Store register bit to T / load T into register bit |
+| `BSET` / `BCLR` | Set / clear a SREG bit |
 
-  * `SER Rd` is implemented as `LDI Rd, 0xFF`.
+`BSET`/`BCLR` cover the single-flag mnemonics: `SEC`/`CLC`, `SEZ`/`CLZ`,
+`SEN`/`CLN`, `SEV`/`CLV`, `SES`/`CLS`, `SEH`/`CLH`, `SET`/`CLT`,
+`SEI`/`CLI`.
 
-### 5.4. Compare and Test Instructions
+### 6.5 MCU control
 
-| Mnemonic | Description | Opcode Mask | Cycles | Flags |
-| :--- | :--- | :--- | :--- | :--- |
-| `CP` | Compare | `0x1400` | 1 | C,Z,N,V,S,H |
-| `CPC` | Compare with Carry | `0x0400` | 1 | C,Z,N,V,S,H |
-| `CPI` | Compare with Immediate | `0x3000` | 1 | C,Z,N,V,S,H |
-| `CPSE` | Compare, Skip if Equal | `0x1000` | 1/2/3 | - |
+| Mnemonic | Description |
+| :--- | :--- |
+| `NOP` | No operation |
+| `SLEEP` | Accepted; no-op in the VM (no sleep modes) |
+| `WDR` | Watchdog reset; no-op in the VM |
+| `BREAK` | Accepted; no-op in the VM (does not halt) |
+| `DES` | One DES round on R0–R7 with key R8–R15; H selects encrypt/decrypt |
 
-**Note on Skip Cycles:** `CPSE`, `SBRC`, and `SBRS` take 1 cycle if no skip occurs. If a skip occurs, they take 2 cycles (to skip a 1-word instruction) or 3 cycles (to skip a 2-word instruction like `LDS`, `STS`, `CALL`, or `JMP`).
+---
 
-### 5.5. Bit and Bit-Test Instructions
+## 7. Limitations
 
-| Mnemonic | Description | Opcode Mask | Cycles | Flags |
-| :--- | :--- | :--- | :--- | :--- |
-| `SBI` | Set Bit in I/O (I/O 0x00-0x1F) | `0x9A00` | 2 | - |
-| `CBI` | Clear Bit in I/O (I/O 0x00-0x1F) | `0x9800` | 2 | - |
-| `SBRC` | Skip if Bit in Register Clear | `0xFC00` | 1/2/3 | - |
-| `SBRS` | Skip if Bit in Register Set | `0xFE00` | 1/2/3 | - |
-| `BST` | Bit Store (Reg -\> T) | `0xFA00` | 1 | T |
-| `BLD` | Bit Load (T -\> Reg) | `0xF800` | 1 | - |
+The emulator models the **CPU core**, not a complete microcontroller:
 
-### 5.6. Shift and Rotate Instructions
+1.  **No peripherals.** The I/O space is a plain byte array. There is no
+    timer, UART, SPI, ADC, or port logic; `IN`/`OUT` only read and write
+    that array.
+2.  **No interrupt controller.** `SEI`, `CLI`, and `RETI` manage the I
+    flag, but there is no vector table and no interrupt is ever raised.
+3.  **No EEPROM access instructions.** The 4 KB EEPROM buffer is
+    allocated but not reachable from emulated code.
+4.  **`LDS`/`STS` use a 16-bit address.** `RAMPD` is not applied, so
+    extended direct addressing only matters on devices with more than 64 KB
+    of data space. The 16 KB SRAM modeled here is fully covered by 16 bits,
+    so this is not a practical limitation for this configuration.
+5.  **`SLEEP`, `WDR`, and `BREAK`** are accepted and advance the PC but have
+    no architectural side effects (they need the sleep/watchdog/OCD
+    subsystems, which are not modeled). `DES` is fully implemented.
 
-| Mnemonic | Description | Opcode Mask | Cycles | Flags |
-| :--- | :--- | :--- | :--- | :--- |
-| `LSR` | Logical Shift Right | `0x9406` | 1 | C,Z,N,V,S |
-| `ROR` | Rotate Right through Carry | `0x9407` | 1 | C,Z,N,V,S |
-| `ASR` | Arithmetic Shift Right | `0x9405` | 1 | C,Z,N,V,S |
-| `ROL` | Rotate Left through Carry | `0x1C00` | 1 | C,Z,N,V,S,H |
-| `SWAP` | Swap Nibbles | `0x9402` | 1 | - |
+---
 
-**Note:** `ROL Rd` is implemented as an alias for `ADC Rd, Rd`.
+## 8. Tests
 
-### 5.7. MCU Control & SREG Instructions
+There are two complementary suites.
 
-| Mnemonic | Description | Opcode | Cycles | Flag |
-| :--- | :--- | :--- | :--- | :--- |
-| `NOP` | No Operation | `0x0000` | 1 | - |
-| `SLEEP` | Sleep (NOP in VM) | `0x9588` | 1 | - |
-| `WDR` | Watchdog Reset (NOP in VM) | `0x95A8` | 1 | - |
-| `SEI` | Set Global Interrupt Flag | `0x9478` | 1 | I=1 |
-| `CLI` | Clear Global Interrupt Flag | `0x94F8` | 1 | I=0 |
-| `SEC` | Set Carry Flag | `0x9408` | 1 | C=1 |
-| `CLC` | Clear Carry Flag | `0x9488` | 1 | C=0 |
-| `SEN` | Set Negative Flag | `0x9428` | 1 | N=1 |
-| `CLN` | Clear Negative Flag | `0x94A8` | 1 | N=0 |
-| `SEZ` | Set Zero Flag | `0x9418` | 1 | Z=1 |
-| `CLZ` | Clear Zero Flag | `0x9498` | 1 | Z=0 |
-| `SEV` | Set Overflow Flag | `0x9438` | 1 | V=1 |
-| `CLV` | Clear Overflow Flag | `0x94B8` | 1 | V=0 |
-| `SES` | Set Sign Flag | `0x9448` | 1 | S=1 |
-| `CLS` | Clear Sign Flag | `0x94C8` | 1 | S=0 |
-| `SEH` | Set Half-carry Flag | `0x9458` | 1 | H=1 |
-| `CLH` | Clear Half-carry Flag | `0x94D8` | 1 | H=0 |
-| `SET` | Set T Flag | `0x9468` | 1 | T=1 |
-| `CLT` | Clear T Flag | `0x94E8` | 1 | T=0 |
+**C tests** (`tests/test_*.c`) — each file targets one instruction group
+(`test_arithmetic`, `test_branch`, `test_compare`, `test_logic`,
+`test_shift`, `test_bit`, `test_transfer`, `test_pointer`, `test_mul`,
+`test_lpm`, `test_sreg`, `test_xmega`, `test_des`, `test_mcu`). They load
+opcodes directly into flash, step the core, and assert on register and flag
+state.
 
------
+**Assembly tests** (`tests/test_*.asm`) — real AVR programs
+(`test_alu`, `test_branch`, `test_transfer`, `test_bitops`, `test_mul`,
+`test_des`) assembled with `avr-gcc` and run end-to-end in the VM. Each
+program is
+self-checking: it compares computed values against expected results and
+writes a sentinel to **R16** — `0x42` if every check passed, `0xEE` on the
+first failure — then halts in a self-loop. The runner executes the image
+under an instruction budget and inspects R16 in the register dump.
 
-## 6\. Implementation Notes & Limitations
-
-While titled "Fully-featured," the VM implementation has several key limitations:
-
-1.  **No Pointer (`X`, `Y`, `Z`) Instructions:** The most significant omission. The VM **does not** implement any of the `LD`, `LDD`, `ST`, or `STD` instructions that use the X, Y, or Z pointer registers. This means code compiled by `avr-gcc` (which relies heavily on these) will not execute.
-2.  **No Multiplication:** None of the `MUL`, `MULS`, `MULSU`, or `FMUL` instructions are implemented.
-3.  **No Program Memory Access:** `LPM` (Load Program Memory) and `SPM` (Store Program Memory) are not implemented.
-4.  **No Indirect Jumps:** `ICALL`, `IJMP`, `EICALL`, and `EIJMP` are not implemented.
-5.  **Limited Extended Addressing:**
-      * `JMP` and `CALL` *are* 22-bit, but they build the address from the opcode itself. They do **not** use the `EIND` register.
-      * `LDS` and `STS` are 16-bit only. They do **not** use the `RAMPD` register for extended SRAM access.
-      * The `rampx`, `rampy`, `rampz`, `rampd`, and `eind` registers are defined in the `avr_t` struct but are **not used** by any instruction.
-6.  **No Peripherals:** The I/O space (`0x20-0xFF`) is a simple byte array. There is no simulation of timers, UART, SPI, or any other peripheral. `IN` and `OUT` simply read/write to this array.
-7.  **No Interrupts:** While `SEI`, `CLI`, and `RETI` are implemented, there is no interrupt vector table or interrupt controller logic. No interrupts will ever be triggered.
-8.  **No EEPROM Access:** The 4KB of EEPROM is allocated, but no instructions to read or write to it are implemented.
-
- 
+Run everything with `make test` (or `make test-c` / `make test-asm` for a
+single suite).

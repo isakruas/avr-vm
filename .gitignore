@@ -1,0 +1,7 @@
+obj
+bin
+*.pdf
+*.txt
+*.o
+*.elf
+*.hex
