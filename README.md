@@ -53,12 +53,21 @@ Run a program:
 
 | Option | Effect |
 | :--- | :--- |
+| `-mmcu=DEVICE` | Select a device preset (core class + memory layout). |
+| `--list-mcus` | List all supported MCU presets and exit. |
 | `-t` | Trace: print each instruction as it executes. |
 | `-n MAX` | Stop after `MAX` instructions (default: run until halt). |
 | `-d` | Dump the register file and SREG at exit. |
 
-The CLI exit code is `0` on normal completion and `2` if the core halted
-on an unknown opcode.
+Example:
+
+```bash
+./bin/avr_vm prog.hex -mmcu=atmega32 -d
+./bin/avr_vm prog.hex --list-mcus
+```
+
+The CLI exit code is `0` on normal completion and `2` if the core halted on
+an unknown/illegal opcode for the selected core.
 
 ---
 
@@ -71,11 +80,11 @@ on an unknown opcode.
     (`AVR_SRAM_START + AVR_SRAM_BYTES - 1`). Push post-decrements, pop
     pre-increments.
   * **Status register (SREG):** 8 flag bits (see §5).
-  * **Program memory (flash):** 256 KB (128 Kwords).
-  * **Data memory (SRAM):** 16 KB.
-  * **EEPROM:** 4 KB allocated (see limitations in §7).
-  * **I/O space:** 256 bytes, reachable through `IN`/`OUT` and the unified
-    data map.
+  * **Program memory (flash):** device-dependent (from selected `-mmcu` preset).
+  * **Data memory (SRAM):** device-dependent (from selected `-mmcu` preset).
+  * **EEPROM:** device-dependent allocation (from selected `-mmcu` preset; see limitations in §7).
+  * **I/O space:** device-dependent window `[0x20, RAMSTART)`, reachable through
+    `IN`/`OUT` and the unified data map.
   * **Extended addressing:** `RAMPX`, `RAMPY`, `RAMPZ` extend the X/Y/Z
     pointers; `RAMPZ` extends `ELPM`; `EIND` extends `EICALL`/`EIJMP`.
 
@@ -84,13 +93,16 @@ on an unknown opcode.
 ## 4. Data memory map
 
 All data access (everything except program flash) goes through
-`avr_read_data` / `avr_write_data` over a single unified address space:
+`avr_read_data` / `avr_write_data` over a single unified address space.
+The exact boundaries are preset-dependent (`-mmcu`):
 
 | Address range | Size | Description |
 | :--- | :--- | :--- |
 | `0x0000 – 0x001F` | 32 B | Register file (R0–R31) |
-| `0x0020 – 0x00FF` | 224 B | I/O register space |
-| `0x0100 – 0x40FF` | 16 KB | Internal SRAM |
+| `0x0020 – RAMSTART-1` | device-dependent | I/O register space |
+| `RAMSTART – RAMEND` | device-dependent | Internal SRAM |
+
+Without `-mmcu`, the generic preset is used.
 
 ---
 
@@ -236,5 +248,12 @@ writes a sentinel to **R16** — `0x42` if every check passed, `0xEE` on the
 first failure — then halts in a self-loop. The runner executes the image
 under an instruction budget and inspects R16 in the register dump.
 
-Run everything with `make test` (or `make test-c` / `make test-asm` for a
-single suite).
+`make test` runs C and ASM suites in an MCU matrix:
+
+* iterates all devices reported by `--list-mcus`
+* passes `-mmcu=<device>` to VM runs
+* for ASM, recompiles each `.asm` with `avr-gcc -mmcu=<device>` before run
+* skips incompatible test/device pairs (core or memory mismatch) and reports
+  `PASS/FAIL/SKIP` per run
+
+Use `make test-c` / `make test-asm` to run a single suite.
