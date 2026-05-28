@@ -79,7 +79,7 @@ an unknown/illegal opcode for the selected core.
   * **Stack pointer (SP):** 16-bit, initialized to the top of SRAM
     (`AVR_SRAM_START + AVR_SRAM_BYTES - 1`). Push post-decrements, pop
     pre-increments.
-  * **Status register (SREG):** 8 flag bits (see §5).
+  * **Status register (SREG):** 8 flag bits.
   * **Program memory (flash):** device-dependent (from selected `-mmcu` preset).
   * **Data memory (SRAM):** device-dependent (from selected `-mmcu` preset).
   * **EEPROM:** device-dependent allocation (from selected `-mmcu` preset; see limitations in §7).
