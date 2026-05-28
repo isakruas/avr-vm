@@ -38,7 +38,8 @@ static void test_sei_cli(avr_t *c) { check_set_clear(c, 0x9478, 0x94F8, F_I); }
 
 int main(void) {
   avr_t cpu;
-  avr_init(&cpu);
+  if (test_init_cpu(&cpu) != 0)
+    return 1;
 
   RUN_TEST(test_sec_clc, &cpu);
   RUN_TEST(test_sez_clz, &cpu);

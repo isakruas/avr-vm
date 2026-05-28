@@ -81,7 +81,8 @@ static void test_spm(avr_t *c) {
 
 int main(void) {
   avr_t cpu;
-  avr_init(&cpu);
+  if (test_init_cpu(&cpu) != 0)
+    return 1;
 
   RUN_TEST(test_lpm_implicit, &cpu);
   RUN_TEST(test_lpm_rd_z, &cpu);

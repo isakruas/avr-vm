@@ -22,6 +22,8 @@
 
 #include "avr_core.h"
 
+#include "avr_devices.h"
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -49,6 +51,37 @@ static void set_flag(avr_t *c, int bit, int val) {
     CLRBIT(c->sreg, bit);
 }
 
+/* Per-core base cycle count used by the VM. The AVRe column also represents
+ * AVRe+; the generic core (AVR_CORE_UNKNOWN) uses it too. Counts are the
+ * nominal internal-SRAM, no-wait-state, 16-bit-PC values; external-memory
+ * wait states and the >128 KB PC penalty are not modeled. */
+static int cyc(const avr_t *c, int e, int xm, int xt, int rc) {
+  switch (c->core) {
+  case AVR_CORE_XM:
+    return xm;
+  case AVR_CORE_XT:
+    return xt;
+  case AVR_CORE_RC:
+    return rc;
+  default:
+    return e; /* AVRe, AVRe+, generic */
+  }
+}
+
+/* Cycles for an LD/ST via pointer: is_store and mode (0=none,1=+,2=-). */
+static int ld_st_cyc(const avr_t *c, int is_store, int mode) {
+  if (is_store) {
+    if (mode == 2)
+      return cyc(c, 2, 2, 1, 2); /* ST -X/-Y/-Z */
+    return cyc(c, 2, 1, 1, 1);   /* ST X/X+ */
+  }
+  if (mode == 0)
+    return cyc(c, 2, 2, 2, 1); /* LD X/Y/Z   */
+  if (mode == 1)
+    return cyc(c, 2, 2, 2, 2); /* LD X+/Y+/Z+ */
+  return cyc(c, 2, 3, 2, 2);   /* LD -X/-Y/-Z */
+}
+
 /* Flash is stored little-endian (low byte first), matching .hex layout. */
 uint16_t avr_flash_word(const avr_t *c, uint32_t byte_addr) {
   return (uint16_t)(c->flash[byte_addr] | (c->flash[byte_addr + 1] << 8));
@@ -62,10 +95,10 @@ void avr_put_op(avr_t *c, uint32_t byte_addr, uint16_t op) {
 uint8_t avr_read_data(avr_t *c, uint32_t addr) {
   if (addr < AVR_REG_COUNT)
     return c->R[addr];
-  if (addr < AVR_SRAM_START)
+  if (addr < c->sram_start)
     return c->io[addr - 0x20];
-  if (addr - AVR_SRAM_START < AVR_SRAM_BYTES)
-    return c->sram[addr - AVR_SRAM_START];
+  if (addr - c->sram_start < c->sram_bytes)
+    return c->sram[addr - c->sram_start];
   fprintf(stderr, "Data read OOB 0x%06lX\n", (unsigned long)addr);
   return 0;
 }
@@ -75,12 +108,12 @@ void avr_write_data(avr_t *c, uint32_t addr, uint8_t v) {
     c->R[addr] = v;
     return;
   }
-  if (addr < AVR_SRAM_START) {
+  if (addr < c->sram_start) {
     c->io[addr - 0x20] = v;
     return;
   }
-  if (addr - AVR_SRAM_START < AVR_SRAM_BYTES) {
-    c->sram[addr - AVR_SRAM_START] = v;
+  if (addr - c->sram_start < c->sram_bytes) {
+    c->sram[addr - c->sram_start] = v;
     return;
   }
   fprintf(stderr, "Data write OOB 0x%06lX\n", (unsigned long)addr);
@@ -273,13 +306,46 @@ static int16_t rjmp_offset(uint16_t op) {
  * Lifecycle
  * ------------------------------------------------------------------------- */
 
+/* Allocate the memory buffers from the configured sizes and set SP to the top
+ * of SRAM. The config fields must already be populated. */
+static void avr_alloc(avr_t *c) {
+  c->io_bytes = (c->sram_start > 0x20) ? c->sram_start - 0x20 : 0;
+  c->flash = (uint8_t *)calloc(c->flash_bytes ? c->flash_bytes : 1, 1);
+  c->sram = (uint8_t *)calloc(c->sram_bytes ? c->sram_bytes : 1, 1);
+  c->eeprom = (uint8_t *)calloc(c->eeprom_bytes ? c->eeprom_bytes : 1, 1);
+  c->io = (uint8_t *)calloc(c->io_bytes ? c->io_bytes : 1, 1);
+  c->sp = (uint16_t)(c->sram_start + c->sram_bytes - 1);
+  c->running = 1;
+}
+
 void avr_init(avr_t *c) {
   memset(c, 0, sizeof(*c));
-  c->flash = (uint8_t *)calloc(AVR_FLASH_BYTES, 1);
-  c->sram = (uint8_t *)calloc(AVR_SRAM_BYTES, 1);
-  c->eeprom = (uint8_t *)calloc(AVR_EEPROM_BYTES, 1);
-  c->sp = AVR_SRAM_START + AVR_SRAM_BYTES - 1;
-  c->running = 1;
+  c->device = "generic";
+  c->core = AVR_CORE_UNKNOWN; /* no gating, single cycle model */
+  c->flash_bytes = AVR_FLASH_BYTES;
+  c->sram_bytes = AVR_SRAM_BYTES;
+  c->eeprom_bytes = AVR_EEPROM_BYTES;
+  c->sram_start = AVR_SRAM_START;
+  avr_alloc(c);
+}
+
+int avr_init_device(avr_t *c, const char *device) {
+  for (int i = 0; i < avr_device_count; i++) {
+    if (strcmp(avr_device_table[i].name, device) == 0) {
+      const avr_device_t *d = &avr_device_table[i];
+      memset(c, 0, sizeof(*c));
+      c->device = d->name;
+      c->core = d->core;
+      c->flash_bytes = d->flash_bytes;
+      c->sram_bytes = d->sram_bytes;
+      c->eeprom_bytes = d->eeprom_bytes;
+      c->sram_start = d->sram_start;
+      avr_alloc(c);
+      c->sp = (uint16_t)d->ram_end; /* exact RAMEND from the device header */
+      return 0;
+    }
+  }
+  return 1;
 }
 
 void avr_free(avr_t *c) {
@@ -289,14 +355,16 @@ void avr_free(avr_t *c) {
   c->sram = NULL;
   free(c->eeprom);
   c->eeprom = NULL;
+  free(c->io);
+  c->io = NULL;
 }
 
 void avr_reset(avr_t *c) {
   memset(c->R, 0, sizeof(c->R));
-  memset(c->io, 0, sizeof(c->io));
-  memset(c->sram, 0, AVR_SRAM_BYTES);
+  memset(c->io, 0, c->io_bytes);
+  memset(c->sram, 0, c->sram_bytes);
   c->pc = 0;
-  c->sp = AVR_SRAM_START + AVR_SRAM_BYTES - 1;
+  c->sp = (uint16_t)(c->sram_start + c->sram_bytes - 1);
   c->sreg = 0;
   c->rampx = c->rampy = c->rampz = c->rampd = c->eind = 0;
   c->cycles = 0;
@@ -335,7 +403,7 @@ static void exec_ld_st_ptr(avr_t *c, uint16_t op,
   if (mode == 1) {
     set_ptr(c, ptr + 1);
   }
-  c->cycles += 2;
+  c->cycles += ld_st_cyc(c, is_store, mode);
 }
 
 /* LDD/STD Rd, Y+q / Z+q: 6-bit unsigned displacement, pointer unchanged. */
@@ -345,11 +413,13 @@ static void exec_ldd_std(avr_t *c, uint16_t op, int use_y, int is_store) {
   uint16_t base = use_y ? avr_get_y(c) : avr_get_z(c);
   uint8_t ramp = use_y ? c->rampy : c->rampz;
   uint32_t addr = ((uint32_t)ramp << 16) | (uint16_t)(base + q);
-  if (is_store)
+  if (is_store) {
     avr_write_data(c, addr, c->R[d]);
-  else
+    c->cycles += cyc(c, 2, 2, 1, 0); /* STD Y+q/Z+q (N/A on AVRrc) */
+  } else {
     c->R[d] = avr_read_data(c, addr);
-  c->cycles += 2;
+    c->cycles += cyc(c, 2, 3, 2, 0); /* LDD Y+q/Z+q (N/A on AVRrc) */
+  }
 }
 
 /* -------------------------------------------------------------------------
@@ -358,7 +428,7 @@ static void exec_ldd_std(avr_t *c, uint16_t op, int use_y, int is_store) {
  * The 64-bit data block lives in R0..R7 (LSB of the block in the LSB of R0)
  * and the 64-bit key in R8..R15. Each DES instruction performs one of the
  * 16 rounds, selected by K; the H flag chooses encryption (0) or decryption
- * (1). Per the manual the round applies the initial permutation and its
+ * (1). The round applies the initial permutation and its
  * inverse on every iteration, so consecutive rounds compose into a full DES.
  * The DES preoutput half-swap is folded into the final round (K == 15) so
  * that running rounds 0..15 yields the standard ciphertext/plaintext.
@@ -369,64 +439,63 @@ static void exec_ldd_std(avr_t *c, uint16_t op, int use_y, int is_store) {
 static const uint8_t DES_IP[64] = {
     58, 50, 42, 34, 26, 18, 10, 2, 60, 52, 44, 36, 28, 20, 12, 4,
     62, 54, 46, 38, 30, 22, 14, 6, 64, 56, 48, 40, 32, 24, 16, 8,
-    57, 49, 41, 33, 25, 17,  9, 1, 59, 51, 43, 35, 27, 19, 11, 3,
+    57, 49, 41, 33, 25, 17, 9,  1, 59, 51, 43, 35, 27, 19, 11, 3,
     61, 53, 45, 37, 29, 21, 13, 5, 63, 55, 47, 39, 31, 23, 15, 7};
 static const uint8_t DES_FP[64] = {
     40, 8, 48, 16, 56, 24, 64, 32, 39, 7, 47, 15, 55, 23, 63, 31,
     38, 6, 46, 14, 54, 22, 62, 30, 37, 5, 45, 13, 53, 21, 61, 29,
     36, 4, 44, 12, 52, 20, 60, 28, 35, 3, 43, 11, 51, 19, 59, 27,
-    34, 2, 42, 10, 50, 18, 58, 26, 33, 1, 41,  9, 49, 17, 57, 25};
+    34, 2, 42, 10, 50, 18, 58, 26, 33, 1, 41, 9,  49, 17, 57, 25};
 static const uint8_t DES_E[48] = {
-    32, 1, 2, 3, 4, 5, 4, 5, 6, 7, 8, 9, 8, 9, 10, 11, 12, 13,
-    12, 13, 14, 15, 16, 17, 16, 17, 18, 19, 20, 21, 20, 21, 22, 23, 24, 25,
-    24, 25, 26, 27, 28, 29, 28, 29, 30, 31, 32, 1};
-static const uint8_t DES_P[32] = {
-    16, 7, 20, 21, 29, 12, 28, 17, 1, 15, 23, 26, 5, 18, 31, 10,
-    2, 8, 24, 14, 32, 27, 3, 9, 19, 13, 30, 6, 22, 11, 4, 25};
+    32, 1,  2,  3,  4,  5,  4,  5,  6,  7,  8,  9,  8,  9,  10, 11,
+    12, 13, 12, 13, 14, 15, 16, 17, 16, 17, 18, 19, 20, 21, 20, 21,
+    22, 23, 24, 25, 24, 25, 26, 27, 28, 29, 28, 29, 30, 31, 32, 1};
+static const uint8_t DES_P[32] = {16, 7, 20, 21, 29, 12, 28, 17, 1,  15, 23,
+                                  26, 5, 18, 31, 10, 2,  8,  24, 14, 32, 27,
+                                  3,  9, 19, 13, 30, 6,  22, 11, 4,  25};
 static const uint8_t DES_PC1[56] = {
-    57, 49, 41, 33, 25, 17, 9, 1, 58, 50, 42, 34, 26, 18,
-    10, 2, 59, 51, 43, 35, 27, 19, 11, 3, 60, 52, 44, 36,
-    63, 55, 47, 39, 31, 23, 15, 7, 62, 54, 46, 38, 30, 22,
-    14, 6, 61, 53, 45, 37, 29, 21, 13, 5, 28, 20, 12, 4};
+    57, 49, 41, 33, 25, 17, 9,  1,  58, 50, 42, 34, 26, 18, 10, 2,  59, 51, 43,
+    35, 27, 19, 11, 3,  60, 52, 44, 36, 63, 55, 47, 39, 31, 23, 15, 7,  62, 54,
+    46, 38, 30, 22, 14, 6,  61, 53, 45, 37, 29, 21, 13, 5,  28, 20, 12, 4};
 static const uint8_t DES_PC2[48] = {
-    14, 17, 11, 24, 1, 5, 3, 28, 15, 6, 21, 10, 23, 19, 12, 4,
-    26, 8, 16, 7, 27, 20, 13, 2, 41, 52, 31, 37, 47, 55, 30, 40,
+    14, 17, 11, 24, 1,  5,  3,  28, 15, 6,  21, 10, 23, 19, 12, 4,
+    26, 8,  16, 7,  27, 20, 13, 2,  41, 52, 31, 37, 47, 55, 30, 40,
     51, 45, 33, 48, 44, 49, 39, 56, 34, 53, 46, 42, 50, 36, 29, 32};
 static const uint8_t DES_SHIFT[16] = {1, 1, 2, 2, 2, 2, 2, 2,
                                       1, 2, 2, 2, 2, 2, 2, 1};
 static const uint8_t DES_SBOX[8][64] = {
-    {14, 4, 13, 1, 2, 15, 11, 8, 3, 10, 6, 12, 5, 9, 0, 7,
-     0, 15, 7, 4, 14, 2, 13, 1, 10, 6, 12, 11, 9, 5, 3, 8,
-     4, 1, 14, 8, 13, 6, 2, 11, 15, 12, 9, 7, 3, 10, 5, 0,
-     15, 12, 8, 2, 4, 9, 1, 7, 5, 11, 3, 14, 10, 0, 6, 13},
-    {15, 1, 8, 14, 6, 11, 3, 4, 9, 7, 2, 13, 12, 0, 5, 10,
-     3, 13, 4, 7, 15, 2, 8, 14, 12, 0, 1, 10, 6, 9, 11, 5,
-     0, 14, 7, 11, 10, 4, 13, 1, 5, 8, 12, 6, 9, 3, 2, 15,
-     13, 8, 10, 1, 3, 15, 4, 2, 11, 6, 7, 12, 0, 5, 14, 9},
-    {10, 0, 9, 14, 6, 3, 15, 5, 1, 13, 12, 7, 11, 4, 2, 8,
-     13, 7, 0, 9, 3, 4, 6, 10, 2, 8, 5, 14, 12, 11, 15, 1,
-     13, 6, 4, 9, 8, 15, 3, 0, 11, 1, 2, 12, 5, 10, 14, 7,
-     1, 10, 13, 0, 6, 9, 8, 7, 4, 15, 14, 3, 11, 5, 2, 12},
-    {7, 13, 14, 3, 0, 6, 9, 10, 1, 2, 8, 5, 11, 12, 4, 15,
-     13, 8, 11, 5, 6, 15, 0, 3, 4, 7, 2, 12, 1, 10, 14, 9,
-     10, 6, 9, 0, 12, 11, 7, 13, 15, 1, 3, 14, 5, 2, 8, 4,
-     3, 15, 0, 6, 10, 1, 13, 8, 9, 4, 5, 11, 12, 7, 2, 14},
-    {2, 12, 4, 1, 7, 10, 11, 6, 8, 5, 3, 15, 13, 0, 14, 9,
-     14, 11, 2, 12, 4, 7, 13, 1, 5, 0, 15, 10, 3, 9, 8, 6,
-     4, 2, 1, 11, 10, 13, 7, 8, 15, 9, 12, 5, 6, 3, 0, 14,
-     11, 8, 12, 7, 1, 14, 2, 13, 6, 15, 0, 9, 10, 4, 5, 3},
-    {12, 1, 10, 15, 9, 2, 6, 8, 0, 13, 3, 4, 14, 7, 5, 11,
-     10, 15, 4, 2, 7, 12, 9, 5, 6, 1, 13, 14, 0, 11, 3, 8,
-     9, 14, 15, 5, 2, 8, 12, 3, 7, 0, 4, 10, 1, 13, 11, 6,
-     4, 3, 2, 12, 9, 5, 15, 10, 11, 14, 1, 7, 6, 0, 8, 13},
-    {4, 11, 2, 14, 15, 0, 8, 13, 3, 12, 9, 7, 5, 10, 6, 1,
-     13, 0, 11, 7, 4, 9, 1, 10, 14, 3, 5, 12, 2, 15, 8, 6,
-     1, 4, 11, 13, 12, 3, 7, 14, 10, 15, 6, 8, 0, 5, 9, 2,
-     6, 11, 13, 8, 1, 4, 10, 7, 9, 5, 0, 15, 14, 2, 3, 12},
-    {13, 2, 8, 4, 6, 15, 11, 1, 10, 9, 3, 14, 5, 0, 12, 7,
-     1, 15, 13, 8, 10, 3, 7, 4, 12, 5, 6, 11, 0, 14, 9, 2,
-     7, 11, 4, 1, 9, 12, 14, 2, 0, 6, 10, 13, 15, 3, 5, 8,
-     2, 1, 14, 7, 4, 10, 8, 13, 15, 12, 9, 0, 3, 5, 6, 11}};
+    {14, 4,  13, 1, 2,  15, 11, 8,  3,  10, 6,  12, 5,  9,  0, 7,
+     0,  15, 7,  4, 14, 2,  13, 1,  10, 6,  12, 11, 9,  5,  3, 8,
+     4,  1,  14, 8, 13, 6,  2,  11, 15, 12, 9,  7,  3,  10, 5, 0,
+     15, 12, 8,  2, 4,  9,  1,  7,  5,  11, 3,  14, 10, 0,  6, 13},
+    {15, 1,  8,  14, 6,  11, 3,  4,  9,  7, 2,  13, 12, 0, 5,  10,
+     3,  13, 4,  7,  15, 2,  8,  14, 12, 0, 1,  10, 6,  9, 11, 5,
+     0,  14, 7,  11, 10, 4,  13, 1,  5,  8, 12, 6,  9,  3, 2,  15,
+     13, 8,  10, 1,  3,  15, 4,  2,  11, 6, 7,  12, 0,  5, 14, 9},
+    {10, 0,  9,  14, 6, 3,  15, 5,  1,  13, 12, 7,  11, 4,  2,  8,
+     13, 7,  0,  9,  3, 4,  6,  10, 2,  8,  5,  14, 12, 11, 15, 1,
+     13, 6,  4,  9,  8, 15, 3,  0,  11, 1,  2,  12, 5,  10, 14, 7,
+     1,  10, 13, 0,  6, 9,  8,  7,  4,  15, 14, 3,  11, 5,  2,  12},
+    {7,  13, 14, 3, 0,  6,  9,  10, 1,  2, 8, 5,  11, 12, 4,  15,
+     13, 8,  11, 5, 6,  15, 0,  3,  4,  7, 2, 12, 1,  10, 14, 9,
+     10, 6,  9,  0, 12, 11, 7,  13, 15, 1, 3, 14, 5,  2,  8,  4,
+     3,  15, 0,  6, 10, 1,  13, 8,  9,  4, 5, 11, 12, 7,  2,  14},
+    {2,  12, 4,  1,  7,  10, 11, 6,  8,  5,  3,  15, 13, 0, 14, 9,
+     14, 11, 2,  12, 4,  7,  13, 1,  5,  0,  15, 10, 3,  9, 8,  6,
+     4,  2,  1,  11, 10, 13, 7,  8,  15, 9,  12, 5,  6,  3, 0,  14,
+     11, 8,  12, 7,  1,  14, 2,  13, 6,  15, 0,  9,  10, 4, 5,  3},
+    {12, 1,  10, 15, 9, 2,  6,  8,  0,  13, 3,  4,  14, 7,  5,  11,
+     10, 15, 4,  2,  7, 12, 9,  5,  6,  1,  13, 14, 0,  11, 3,  8,
+     9,  14, 15, 5,  2, 8,  12, 3,  7,  0,  4,  10, 1,  13, 11, 6,
+     4,  3,  2,  12, 9, 5,  15, 10, 11, 14, 1,  7,  6,  0,  8,  13},
+    {4,  11, 2,  14, 15, 0, 8,  13, 3,  12, 9, 7,  5,  10, 6, 1,
+     13, 0,  11, 7,  4,  9, 1,  10, 14, 3,  5, 12, 2,  15, 8, 6,
+     1,  4,  11, 13, 12, 3, 7,  14, 10, 15, 6, 8,  0,  5,  9, 2,
+     6,  11, 13, 8,  1,  4, 10, 7,  9,  5,  0, 15, 14, 2,  3, 12},
+    {13, 2,  8,  4, 6,  15, 11, 1,  10, 9,  3,  14, 5,  0,  12, 7,
+     1,  15, 13, 8, 10, 3,  7,  4,  12, 5,  6,  11, 0,  14, 9,  2,
+     7,  11, 4,  1, 9,  12, 14, 2,  0,  6,  10, 13, 15, 3,  5,  8,
+     2,  1,  14, 7, 4,  10, 8,  13, 15, 12, 9,  0,  3,  5,  6,  11}};
 
 /* Permute the low nin bits of in through table t (1-based, bit 1 = MSB). */
 static uint64_t des_permute(uint64_t in, const uint8_t *t, int nout, int nin) {
@@ -465,8 +534,10 @@ static void des_subkeys(uint64_t key, uint64_t sk[16]) {
 /* Execute one DES round K (0..15); H selects encrypt (0) or decrypt (1). */
 static void exec_des(avr_t *c, int k, int decrypt) {
   uint64_t block = 0, key = 0, sk[16];
-  for (int i = 7; i >= 0; i--) block = (block << 8) | c->R[i];
-  for (int i = 7; i >= 0; i--) key = (key << 8) | c->R[8 + i];
+  for (int i = 7; i >= 0; i--)
+    block = (block << 8) | c->R[i];
+  for (int i = 7; i >= 0; i--)
+    key = (key << 8) | c->R[8 + i];
   des_subkeys(key, sk);
 
   uint64_t x = des_permute(block, DES_IP, 64, 64);
@@ -474,13 +545,61 @@ static void exec_des(avr_t *c, int k, int decrypt) {
   uint32_t r = (uint32_t)x;
   uint32_t nl = r;
   uint32_t nr = l ^ des_feistel(r, sk[decrypt ? 15 - k : k]);
-  if (k == 15) {                       /* fold in the DES preoutput swap */
+  if (k == 15) { /* fold in the DES preoutput swap */
     uint32_t tmp = nl;
     nl = nr;
     nr = tmp;
   }
   uint64_t res = des_permute(((uint64_t)nl << 32) | nr, DES_FP, 64, 64);
-  for (int i = 0; i < 8; i++) c->R[i] = (uint8_t)(res >> (8 * i));
+  for (int i = 0; i < 8; i++)
+    c->R[i] = (uint8_t)(res >> (8 * i));
+}
+
+/* -------------------------------------------------------------------------
+ * Per-core instruction gating
+ *
+ * Not every instruction exists on every CPU version. When a concrete core is
+ * selected, reject the instructions it lacks by halting on them. The generic
+ * core (AVR_CORE_UNKNOWN) allows everything, so it is unaffected.
+ * ------------------------------------------------------------------------- */
+static int gate_opcode(avr_t *c, uint16_t op, uint32_t pc) {
+  if (c->core == AVR_CORE_UNKNOWN)
+    return 0;
+  int xm = (c->core == AVR_CORE_XM);
+  int e = (c->core == AVR_CORE_E);
+  int rc = (c->core == AVR_CORE_RC);
+  int bad = 0;
+
+  if ((op & 0xFE0F) == 0x9204 || (op & 0xFE0F) == 0x9205 ||
+      (op & 0xFE0F) == 0x9206 || (op & 0xFE0F) == 0x9207 ||
+      (op & 0xFF0F) == 0x940B) {
+    bad = !xm; /* RMW (XCH/LAS/LAC/LAT) and DES: AVRxm only */
+  } else if ((op & 0xFC00) == 0x9C00 || (op & 0xFF00) == 0x0200 ||
+             (op & 0xFF88) == 0x0300 || (op & 0xFF88) == 0x0308 ||
+             (op & 0xFF88) == 0x0380 || (op & 0xFF88) == 0x0388) {
+    bad = (e || rc); /* multiply family: AVRe+ and up */
+  } else if (op == 0x9419 || op == 0x9519 || (op & 0xFE0F) == 0x9006 ||
+             (op & 0xFE0F) == 0x9007 || op == 0x95D8) {
+    bad = (e || rc); /* extended addressing: EIJMP/EICALL/ELPM */
+  } else if ((op & 0xFF00) == 0x9600 || (op & 0xFF00) == 0x9700 ||
+             (op & 0xFF00) == 0x0100 || (op & 0xFE0E) == 0x940C ||
+             (op & 0xFE0E) == 0x940E || (op & 0xFE0F) == 0x9004 ||
+             (op & 0xFE0F) == 0x9005 || op == 0x95C8 || op == 0x95E8 ||
+             op == 0x95F8) {
+    bad = rc; /* ADIW/SBIW/MOVW/JMP/CALL/LPM/SPM: not on AVRrc */
+  } else if (((op & 0xD208) == 0x8000 || (op & 0xD208) == 0x8008 ||
+              (op & 0xD208) == 0x8200 || (op & 0xD208) == 0x8208) &&
+             imm_q(op) != 0) {
+    bad = rc; /* LDD/STD with displacement: not on AVRrc */
+  }
+
+  if (!bad)
+    return 0;
+  fprintf(stderr, "Illegal instruction 0x%04X for %s at PC=0x%06lX\n", op,
+          avr_core_name(c->core), (unsigned long)pc);
+  c->unknown_opcode = 1;
+  c->running = 0;
+  return 1;
 }
 
 /* -------------------------------------------------------------------------
@@ -494,6 +613,8 @@ void avr_step(avr_t *c) {
   uint32_t cur_pc = c->pc;
   uint16_t op = avr_flash_word(c, cur_pc);
   c->pc += 2;
+  if (gate_opcode(c, op, cur_pc))
+    return;
 
   /* NOP -- 0000 0000 0000 0000 */
   if (op == 0x0000) {
@@ -818,7 +939,7 @@ void avr_step(avr_t *c) {
     uint16_t ea = avr_flash_word(c, c->pc);
     c->pc += 2;
     c->R[d] = avr_read_data(c, ea);
-    c->cycles += 2;
+    c->cycles += cyc(c, 2, 3, 3, 2);
     TRACE(c, "PC=%06lX  %04X %04X  LDS R%u,[0x%04X]\n", (unsigned long)cur_pc,
           op, ea, d, ea);
     return;
@@ -829,7 +950,7 @@ void avr_step(avr_t *c) {
     uint16_t z = avr_get_z(c);
     c->R[d] = avr_read_data(c, ((uint32_t)c->rampz << 16) | z);
     avr_set_z(c, (uint16_t)(z + 1));
-    c->cycles += 2;
+    c->cycles += ld_st_cyc(c, 0, 1);
     TRACE(c, "PC=%06lX  %04X  LD R%u,Z+\n", (unsigned long)cur_pc, op, d);
     return;
   }
@@ -839,7 +960,7 @@ void avr_step(avr_t *c) {
     uint16_t z = (uint16_t)(avr_get_z(c) - 1);
     avr_set_z(c, z);
     c->R[d] = avr_read_data(c, ((uint32_t)c->rampz << 16) | z);
-    c->cycles += 2;
+    c->cycles += ld_st_cyc(c, 0, 2);
     TRACE(c, "PC=%06lX  %04X  LD R%u,-Z\n", (unsigned long)cur_pc, op, d);
     return;
   }
@@ -866,7 +987,7 @@ void avr_step(avr_t *c) {
   if ((op & 0xFE0F) == 0x9006) {
     uint8_t d = reg_d5(op);
     uint32_t z = ((uint32_t)c->rampz << 16) | avr_get_z(c);
-    c->R[d] = c->flash[z % AVR_FLASH_BYTES];
+    c->R[d] = c->flash[z % c->flash_bytes];
     c->cycles += 3;
     TRACE(c, "PC=%06lX  %04X  ELPM R%u,Z\n", (unsigned long)cur_pc, op, d);
     return;
@@ -875,7 +996,7 @@ void avr_step(avr_t *c) {
   if ((op & 0xFE0F) == 0x9007) {
     uint8_t d = reg_d5(op);
     uint32_t z = ((uint32_t)c->rampz << 16) | avr_get_z(c);
-    c->R[d] = c->flash[z % AVR_FLASH_BYTES];
+    c->R[d] = c->flash[z % c->flash_bytes];
     z = (z + 1) & 0xFFFFFF;
     c->rampz = (uint8_t)((z >> 16) & 0xFF);
     avr_set_z(c, (uint16_t)(z & 0xFFFF));
@@ -922,7 +1043,7 @@ void avr_step(avr_t *c) {
   if ((op & 0xFE0F) == 0x900F) {
     uint8_t d = reg_d5(op);
     c->R[d] = pop8(c);
-    c->cycles += 2;
+    c->cycles += cyc(c, 2, 2, 2, 3);
     TRACE(c, "PC=%06lX  %04X  POP R%u\n", (unsigned long)cur_pc, op, d);
     return;
   }
@@ -933,7 +1054,7 @@ void avr_step(avr_t *c) {
     uint16_t ea = avr_flash_word(c, c->pc);
     c->pc += 2;
     avr_write_data(c, ea, c->R[r]);
-    c->cycles += 2;
+    c->cycles += cyc(c, 2, 2, 2, 1);
     TRACE(c, "PC=%06lX  %04X %04X  STS [0x%04X],R%u\n", (unsigned long)cur_pc,
           op, ea, ea, r);
     return;
@@ -1039,7 +1160,7 @@ void avr_step(avr_t *c) {
   if ((op & 0xFE0F) == 0x920F) {
     uint8_t r = reg_d5(op);
     push8(c, c->R[r]);
-    c->cycles += 2;
+    c->cycles += cyc(c, 2, 1, 1, 1);
     TRACE(c, "PC=%06lX  %04X  PUSH R%u\n", (unsigned long)cur_pc, op, r);
     return;
   }
@@ -1250,7 +1371,7 @@ void avr_step(avr_t *c) {
   /* RET -- 1001 0101 0000 1000  (pop return address) */
   if (op == 0x9508) {
     c->pc = pop16(c);
-    c->cycles += 4;
+    c->cycles += cyc(c, 4, 4, 4, 6);
     TRACE(c, "PC=%06lX  %04X  RET -> 0x%06lX\n", (unsigned long)cur_pc, op,
           (unsigned long)c->pc);
     return;
@@ -1260,7 +1381,7 @@ void avr_step(avr_t *c) {
     uint16_t z = avr_get_z(c);
     push16(c, (uint16_t)(cur_pc + 2));
     c->pc = (uint32_t)z << 1;
-    c->cycles += 3;
+    c->cycles += cyc(c, 3, 2, 2, 3);
     TRACE(c, "PC=%06lX  %04X  ICALL\n", (unsigned long)cur_pc, op);
     return;
   }
@@ -1268,7 +1389,7 @@ void avr_step(avr_t *c) {
   if (op == 0x9518) {
     c->pc = pop16(c);
     SETBIT(c->sreg, F_I);
-    c->cycles += 4;
+    c->cycles += cyc(c, 4, 4, 4, 6);
     TRACE(c, "PC=%06lX  %04X  RETI\n", (unsigned long)cur_pc, op);
     return;
   }
@@ -1277,7 +1398,7 @@ void avr_step(avr_t *c) {
     uint32_t z = ((uint32_t)c->eind << 16) | avr_get_z(c);
     push16(c, (uint16_t)(cur_pc + 2));
     c->pc = z << 1;
-    c->cycles += 3;
+    c->cycles += cyc(c, 4, 3, 3, 0);
     TRACE(c, "PC=%06lX  %04X  EICALL\n", (unsigned long)cur_pc, op);
     return;
   }
@@ -1309,7 +1430,7 @@ void avr_step(avr_t *c) {
   /* ELPM (implicit R0, RAMPZ:Z) -- 1001 0101 1101 1000 */
   if (op == 0x95D8) {
     uint32_t z = ((uint32_t)c->rampz << 16) | avr_get_z(c);
-    c->R[0] = c->flash[z % AVR_FLASH_BYTES];
+    c->R[0] = c->flash[z % c->flash_bytes];
     c->cycles += 3;
     TRACE(c, "PC=%06lX  %04X  ELPM\n", (unsigned long)cur_pc, op);
     return;
@@ -1318,7 +1439,7 @@ void avr_step(avr_t *c) {
    * SPM Z+ -- 1001 0101 1111 1000  (same, then increment Z by 2) */
   if (op == 0x95E8 || op == 0x95F8) {
     uint32_t z = ((uint32_t)c->rampz << 16) | avr_get_z(c);
-    if (z + 1 < AVR_FLASH_BYTES) {
+    if (z + 1 < c->flash_bytes) {
       c->flash[z] = c->R[0];
       c->flash[z + 1] = c->R[1];
     }
@@ -1350,7 +1471,7 @@ void avr_step(avr_t *c) {
     uint32_t k = decode_jmp_call_k(op, op2);
     push16(c, (uint16_t)(cur_pc + 4));
     c->pc = k << 1;
-    c->cycles += 4;
+    c->cycles += cyc(c, 4, 3, 3, 0); /* CALL (N/A on AVRrc) */
     TRACE(c, "PC=%06lX  %04X %04X  CALL 0x%06lX\n", (unsigned long)cur_pc, op,
           op2, (unsigned long)c->pc);
     return;
@@ -1515,7 +1636,7 @@ void avr_step(avr_t *c) {
     int16_t k = rjmp_offset(op);
     push16(c, (uint16_t)(cur_pc + 2));
     c->pc = (uint32_t)((int32_t)cur_pc + 2 + ((int32_t)k * 2));
-    c->cycles += 3;
+    c->cycles += cyc(c, 3, 2, 2, 3);
     TRACE(c, "PC=%06lX  %04X  RCALL %+d\n", (unsigned long)cur_pc, op, k);
     return;
   }
@@ -1658,7 +1779,7 @@ int avr_load_hex(avr_t *c, const char *fn) {
         unsigned v;
         sscanf(line + 9 + i * 2, "%2x", &v);
         uint32_t a = base + addr + i;
-        if (a >= AVR_FLASH_BYTES) {
+        if (a >= c->flash_bytes) {
           fprintf(stderr, "HEX overflows flash\n");
           fclose(f);
           return -1;
@@ -1679,6 +1800,9 @@ int avr_load_hex(avr_t *c, const char *fn) {
 
 void avr_dump_regs(const avr_t *c) {
   int i;
+  printf("Device: %s (%s)  flash=%u SRAM=%u EEPROM=%u\n", c->device,
+         avr_core_name(c->core), c->flash_bytes, c->sram_bytes,
+         c->eeprom_bytes);
   printf("Registers:\n");
   for (i = 0; i < AVR_REG_COUNT; i++) {
     printf("R%-2d = 0x%02X", i, c->R[i]);
@@ -1692,4 +1816,31 @@ void avr_dump_regs(const avr_t *c) {
          (c->sreg & 0x08) ? 'V' : '-', (c->sreg & 0x04) ? 'N' : '-',
          (c->sreg & 0x02) ? 'Z' : '-', (c->sreg & 0x01) ? 'C' : '-');
   printf("Cycles = %llu\n", (unsigned long long)c->cycles);
+}
+
+const char *avr_core_name(avr_core_class_t cls) {
+  switch (cls) {
+  case AVR_CORE_RC:
+    return "AVRrc";
+  case AVR_CORE_E:
+    return "AVRe";
+  case AVR_CORE_EP:
+    return "AVRe+";
+  case AVR_CORE_XT:
+    return "AVRxt";
+  case AVR_CORE_XM:
+    return "AVRxm";
+  default:
+    return "generic";
+  }
+}
+
+void avr_list_devices(void) {
+  printf("%-22s %-7s %9s %8s %8s\n", "DEVICE", "CORE", "FLASH", "SRAM",
+         "EEPROM");
+  for (int i = 0; i < avr_device_count; i++) {
+    const avr_device_t *d = &avr_device_table[i];
+    printf("%-22s %-7s %8uB %7uB %7uB\n", d->name, avr_core_name(d->core),
+           d->flash_bytes, d->sram_bytes, d->eeprom_bytes);
+  }
 }

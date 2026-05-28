@@ -99,7 +99,8 @@ static void test_cpse_skip_2word(avr_t *c) {
 
 int main(void) {
   avr_t cpu;
-  avr_init(&cpu);
+  if (test_init_cpu(&cpu) != 0)
+    return 1;
 
   RUN_TEST(test_cp_equal, &cpu);
   RUN_TEST(test_cp_less, &cpu);

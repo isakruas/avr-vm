@@ -100,7 +100,8 @@ static void test_fmulsu(avr_t *c) {
 
 int main(void) {
   avr_t cpu;
-  avr_init(&cpu);
+  if (test_init_cpu(&cpu) != 0)
+    return 1;
 
   RUN_TEST(test_mul_basic, &cpu);
   RUN_TEST(test_mul_zero, &cpu);

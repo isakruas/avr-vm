@@ -34,6 +34,9 @@
 
 #include <stdint.h>
 
+/* Default ("generic") configuration used by avr_init when no device preset
+ * is selected: a large memory map that accepts any program. avr_init_device
+ * overrides these per device. */
 #define AVR_FLASH_BYTES (256 * 1024) /* 128 Kwords */
 #define AVR_SRAM_BYTES (16 * 1024)
 #define AVR_EEPROM_BYTES (4 * 1024)
@@ -43,6 +46,18 @@
 
 /* SREG flag bit positions (bit 0 = C, bit 7 = I). */
 enum { F_C = 0, F_Z, F_N, F_V, F_S, F_H, F_T, F_I };
+
+/* CPU version class. AVR_CORE_UNKNOWN means "generic": all instructions
+ * allowed and a single cycle model. A concrete class enables per-core cycle
+ * timing and instruction gating. */
+typedef enum {
+  AVR_CORE_UNKNOWN = 0,
+  AVR_CORE_RC, /* AVRrc  -- reduced core, 16 registers */
+  AVR_CORE_E,  /* AVRe   -- classic, MOVW + enhanced LPM */
+  AVR_CORE_EP, /* AVRe+  -- AVRe plus multiply / extended addressing */
+  AVR_CORE_XT, /* AVRxt  -- megaAVR 0-series, AVR Dx/Ex */
+  AVR_CORE_XM  /* AVRxm  -- XMEGA, adds RMW + DES */
+} avr_core_class_t;
 
 typedef struct {
   uint8_t R[AVR_REG_COUNT];
@@ -54,7 +69,16 @@ typedef struct {
   uint8_t *flash;
   uint8_t *sram;
   uint8_t *eeprom;
-  uint8_t io[AVR_IO_BYTES];
+  uint8_t *io;
+
+  /* Runtime memory configuration (see avr_init / avr_init_device). */
+  const char *device;    /* selected device name, or "generic" */
+  avr_core_class_t core; /* CPU version for timing / gating */
+  uint32_t flash_bytes;
+  uint32_t sram_bytes;
+  uint32_t eeprom_bytes;
+  uint32_t io_bytes;   /* size of the I/O window [0x20, sram_start) */
+  uint32_t sram_start; /* first internal SRAM address (RAMSTART) */
 
   uint64_t cycles;
   int running;
@@ -62,8 +86,11 @@ typedef struct {
   int unknown_opcode;
 } avr_t;
 
-/* Lifecycle: allocate memories, zero state, free buffers. */
+/* Lifecycle: allocate memories, zero state, free buffers. avr_init applies the
+ * generic defaults; avr_init_device applies a device preset by name (returns 0
+ * on success, non-zero if the device is unknown). */
 void avr_init(avr_t *c);
+int avr_init_device(avr_t *c, const char *device);
 void avr_free(avr_t *c);
 void avr_reset(avr_t *c);
 
@@ -89,5 +116,9 @@ void avr_set_z(avr_t *c, uint16_t v);
 /* Intel-HEX loader and register dump. */
 int avr_load_hex(avr_t *c, const char *fn);
 void avr_dump_regs(const avr_t *c);
+
+/* Human-readable core-class name; list every known device preset. */
+const char *avr_core_name(avr_core_class_t cls);
+void avr_list_devices(void);
 
 #endif

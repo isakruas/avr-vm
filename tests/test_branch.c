@@ -120,7 +120,8 @@ static void test_branch_negative_offset(avr_t *c) {
 
 int main(void) {
   avr_t cpu;
-  avr_init(&cpu);
+  if (test_init_cpu(&cpu) != 0)
+    return 1;
 
   RUN_TEST(test_rjmp_forward, &cpu);
   RUN_TEST(test_rjmp_backward, &cpu);

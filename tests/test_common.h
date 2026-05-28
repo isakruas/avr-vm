@@ -110,6 +110,20 @@ static inline void run_n(avr_t *c, int n) {
     avr_step(c);
 }
 
+/* Initialize test CPU. When AVR_TEST_MCU is set, use that preset. */
+static inline int test_init_cpu(avr_t *c) {
+  const char *mcu = getenv("AVR_TEST_MCU");
+  if (mcu && *mcu) {
+    if (avr_init_device(c, mcu) != 0) {
+      fprintf(stderr, "Unknown AVR_TEST_MCU: %s\n", mcu);
+      return 1;
+    }
+    return 0;
+  }
+  avr_init(c);
+  return 0;
+}
+
 /* Step once with stderr suppressed, for opcodes that intentionally emit a
    diagnostic (e.g. the unknown-opcode halt). Keeps the test output clean. */
 static inline void step_silent(avr_t *c) {
