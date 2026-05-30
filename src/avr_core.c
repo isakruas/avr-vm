@@ -40,6 +40,14 @@
       printf(__VA_ARGS__);                                                     \
   } while (0)
 
+/* Classic AVR EEPROM I/O registers (data-space absolute addresses:
+ * 0x3F=EECR, 0x40=EEDR, 0x41=EEARL, 0x42=EEARH). These are represented in the
+ * io[] window with a 0x20 offset removed. */
+#define IO_EECR 0x1F
+#define IO_EEDR 0x20
+#define IO_EEARL 0x21
+#define IO_EEARH 0x22
+
 /* -------------------------------------------------------------------------
  * Memory and pointer helpers
  * ------------------------------------------------------------------------- */
@@ -92,6 +100,41 @@ void avr_put_op(avr_t *c, uint32_t byte_addr, uint16_t op) {
   c->flash[byte_addr + 1] = (uint8_t)((op >> 8) & 0xFF);
 }
 
+static void eeprom_handle_eecr_write(avr_t *c, uint8_t old_eecr, uint8_t new_eecr) {
+  uint32_t eear = (uint32_t)c->io[IO_EEARL] | ((uint32_t)(c->io[IO_EEARH] & 0x0F) << 8);
+
+  // EEMPE (bit 2) write handling: set the hardware 4-cycle timer
+  if (new_eecr & BIT(2)) {
+    c->eempe_timer = 4;
+  } else {
+    c->eempe_timer = 0;
+  }
+
+  // EERE (bit 0) read handling
+  if ((new_eecr & BIT(0)) && !(old_eecr & BIT(0))) {
+    if (eear < c->eeprom_bytes) {
+      c->io[IO_EEDR] = c->eeprom[eear];
+    }
+    CLRBIT(c->io[IO_EECR], 0); // Clear EERE immediately
+  }
+
+  // EEPE (bit 1) write handling: must be set while EEMPE timer is active
+  if ((new_eecr & BIT(1)) && !(old_eecr & BIT(1))) {
+    if (c->eempe_timer > 0) {
+      // Buffer the address and data, start programming cycle
+      c->eeprom_write_addr = eear;
+      c->eeprom_write_val = c->io[IO_EEDR];
+      c->eeprom_write_cycles_left = 64; // 64 clock cycles delay
+      
+      c->eempe_timer = 0;
+      CLRBIT(c->io[IO_EECR], 2); // Clear EEMPE immediately
+    } else {
+      // If EEMPE is not active, EEPE write has no effect
+      CLRBIT(c->io[IO_EECR], 1);
+    }
+  }
+}
+
 uint8_t avr_read_data(avr_t *c, uint32_t addr) {
   if (addr < AVR_REG_COUNT)
     return c->R[addr];
@@ -109,7 +152,16 @@ void avr_write_data(avr_t *c, uint32_t addr, uint8_t v) {
     return;
   }
   if (addr < c->sram_start) {
-    c->io[addr - 0x20] = v;
+    uint32_t io_addr = addr - 0x20;
+    if (c->eeprom_write_cycles_left > 0 && (io_addr == IO_EECR || io_addr == IO_EEARL || io_addr == IO_EEARH || io_addr == IO_EEDR)) {
+      // Ignore writes to EEPROM registers during active programming cycle
+      return;
+    }
+    uint8_t old = c->io[io_addr];
+    c->io[io_addr] = v;
+    if (io_addr == IO_EECR) {
+      eeprom_handle_eecr_write(c, old, v);
+    }
     return;
   }
   if (addr - c->sram_start < c->sram_bytes) {
@@ -609,7 +661,36 @@ static int gate_opcode(avr_t *c, uint16_t op, uint32_t pc) {
  * mnemonic and opcode bit pattern. Each branch advances PC and updates
  * the cycle count.
  * ------------------------------------------------------------------------- */
+static void avr_step_internal(avr_t *c);
+
 void avr_step(avr_t *c) {
+  uint64_t start_cycles = c->cycles;
+  avr_step_internal(c);
+  uint64_t consumed = c->cycles - start_cycles;
+  
+  if (c->eempe_timer > 0) {
+    if (consumed >= c->eempe_timer) {
+      c->eempe_timer = 0;
+      CLRBIT(c->io[IO_EECR], 2); // EEMPE
+    } else {
+      c->eempe_timer -= consumed;
+    }
+  }
+
+  if (c->eeprom_write_cycles_left > 0) {
+    if (consumed >= c->eeprom_write_cycles_left) {
+      c->eeprom_write_cycles_left = 0;
+      if (c->eeprom_write_addr < c->eeprom_bytes) {
+        c->eeprom[c->eeprom_write_addr] = c->eeprom_write_val;
+      }
+      CLRBIT(c->io[IO_EECR], 1); // Clear EEPE (write complete)
+    } else {
+      c->eeprom_write_cycles_left -= consumed;
+    }
+  }
+}
+
+static void avr_step_internal(avr_t *c) {
   uint32_t cur_pc = c->pc;
   uint16_t op = avr_flash_word(c, cur_pc);
   c->pc += 2;

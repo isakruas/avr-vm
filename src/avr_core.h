@@ -84,6 +84,10 @@ typedef struct {
   int running;
   int trace;
   int unknown_opcode;
+  uint32_t eempe_timer;
+  uint32_t eeprom_write_cycles_left;
+  uint32_t eeprom_write_addr;
+  uint8_t eeprom_write_val;
 } avr_t;
 
 /* Lifecycle: allocate memories, zero state, free buffers. avr_init applies the
