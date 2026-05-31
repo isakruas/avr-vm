@@ -1706,6 +1706,12 @@ static void avr_step_internal(avr_t *c) {
   /* RJMP k -- 1100 kkkk kkkk kkkk  (relative jump, k is signed words) */
   if ((op & 0xF000) == 0xC000) {
     int16_t k = rjmp_offset(op);
+    if (k == -1) {
+      c->cycles += 1;
+      TRACE(c, "PC=%06lX  %04X  RJMP -1 (HALT)\n", (unsigned long)cur_pc, op);
+      c->running = 0;
+      return;
+    }
     c->pc = (uint32_t)((int32_t)cur_pc + 2 + ((int32_t)k * 2));
     c->cycles += 2;
     TRACE(c, "PC=%06lX  %04X  RJMP %+d -> 0x%06lX\n", (unsigned long)cur_pc, op,
