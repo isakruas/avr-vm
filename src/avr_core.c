@@ -140,9 +140,11 @@ uint8_t avr_read_data(avr_t *c, uint32_t addr) {
     return c->R[addr];
   /* SREG and the stack pointer live in dedicated CPU fields, not io[]. Map their
    * data-space addresses so IN/LDS observe the live values (e.g. IN R0,SREG). */
-  if (addr == 0x5F) return c->sreg;
-  if (addr == 0x5D) return (uint8_t)(c->sp & 0xFF);
-  if (addr == 0x5E) return (uint8_t)((c->sp >> 8) & 0xFF);
+  if (c->core != AVR_CORE_RC) {
+    if (addr == 0x5F) return c->sreg;
+    if (addr == 0x5D) return (uint8_t)(c->sp & 0xFF);
+    if (addr == 0x5E) return (uint8_t)((c->sp >> 8) & 0xFF);
+  }
   if (addr < c->sram_start)
     return c->io[addr - 0x20];
   if (addr - c->sram_start < c->sram_bytes)
@@ -158,9 +160,11 @@ void avr_write_data(avr_t *c, uint32_t addr, uint8_t v) {
   }
   /* SREG and the stack pointer are CPU fields, not io[]; route OUT/STS to them
    * so e.g. OUT SREG,R0 in an ISR epilogue restores the real flags. */
-  if (addr == 0x5F) { c->sreg = v; return; }
-  if (addr == 0x5D) { c->sp = (uint16_t)((c->sp & 0xFF00) | v); return; }
-  if (addr == 0x5E) { c->sp = (uint16_t)((c->sp & 0x00FF) | ((uint16_t)v << 8)); return; }
+  if (c->core != AVR_CORE_RC) {
+    if (addr == 0x5F) { c->sreg = v; return; }
+    if (addr == 0x5D) { c->sp = (uint16_t)((c->sp & 0xFF00) | v); return; }
+    if (addr == 0x5E) { c->sp = (uint16_t)((c->sp & 0x00FF) | ((uint16_t)v << 8)); return; }
+  }
   if (addr < c->sram_start) {
     uint32_t io_addr = addr - 0x20;
     if (c->eeprom_write_cycles_left > 0 && (io_addr == IO_EECR || io_addr == IO_EEARL || io_addr == IO_EEARH || io_addr == IO_EEDR)) {
