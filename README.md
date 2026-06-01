@@ -58,12 +58,17 @@ Run a program:
 | `-t` | Trace: print each instruction as it executes. |
 | `-n MAX` | Stop after `MAX` instructions (default: run until halt). |
 | `-d` | Dump the register file and SREG at exit. |
+| `--irq=VEC` | Queue interrupt vector index `VEC` (repeatable; `1..255`). |
+| `--irq-at=VEC:STEP` | Queue vector `VEC` when executed instruction count reaches `STEP`. |
+| `--irq-every=VEC:N` | Queue vector `VEC` every `N` executed instructions. |
 
 Example:
 
 ```bash
 ./bin/avr_vm prog.hex -mmcu=atmega32 -d
 ./bin/avr_vm prog.hex --list-mcus
+./bin/avr_vm prog.hex -mmcu=atmega328p --irq=1 -t
+./bin/avr_vm prog.hex -mmcu=atmega328p --irq-at=14:5000 --irq-every=14:10000
 ```
 
 The CLI exit code is `0` on normal completion and `2` if the core halted on
@@ -215,7 +220,10 @@ The emulator models the **CPU core**, not a complete microcontroller:
     timer, UART, SPI, ADC, or port logic; `IN`/`OUT` only read and write
     that array.
 2.  **No interrupt controller.** `SEI`, `CLI`, and `RETI` manage the I
-    flag, but there is no vector table and no interrupt is ever raised.
+    flag, and the VM now includes a generic pending-vector queue
+    (`--irq`, `--irq-at`, `--irq-every`) plus priority dispatch
+    (lowest vector index first). Peripheral-driven interrupt generation is
+    currently limited to the modeled Timer0 COMPA source.
 3.  **No EEPROM access instructions.** The 4 KB EEPROM buffer is
     allocated but not reachable from emulated code.
 4.  **`LDS`/`STS` use a 16-bit address.** `RAMPD` is not applied, so

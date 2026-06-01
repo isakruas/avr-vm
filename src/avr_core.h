@@ -90,6 +90,7 @@ typedef struct {
   uint8_t eeprom_write_val;
   uint32_t timer0_acc;       /* Timer0 prescaler cycle accumulator */
   uint8_t timer0_compa_vec;  /* TIMER0_COMPA vector index for this device (0 = unsupported) */
+  uint8_t irq_pending[256];  /* pending interrupt vectors by index (0..255) */
 } avr_t;
 
 /* Lifecycle: allocate memories, zero state, free buffers. avr_init applies the
@@ -102,6 +103,8 @@ void avr_reset(avr_t *c);
 
 /* Decode and execute one instruction starting at PC. */
 void avr_step(avr_t *c);
+/* Queue one interrupt vector request (index >= 1). Delivery occurs when I=1. */
+void avr_raise_interrupt(avr_t *c, uint8_t vector_index);
 
 /* Unified data-space access (R0..R31 / I/O / SRAM). */
 uint8_t avr_read_data(avr_t *c, uint32_t addr);

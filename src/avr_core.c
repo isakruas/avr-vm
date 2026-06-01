@@ -694,6 +694,18 @@ static void avr_step_internal(avr_t *c);
 #define IO_TIMSK0 0x4E
 #define BIT_OCF0A  1 /* TIFR0 / TIMSK0 bit 1 (OCF0A / OCIE0A) */
 
+/* Vector slot width mirrors ik8b codegen:
+ * - AVRrc uses 1-word RJMP slots  (2 bytes)
+ * - other cores use 2-word JMP slots (4 bytes) */
+static uint32_t vector_slot_bytes(const avr_t *c) {
+  return (c->core == AVR_CORE_RC) ? 2u : 4u;
+}
+
+void avr_raise_interrupt(avr_t *c, uint8_t vector_index) {
+  if (vector_index == 0) return; /* RESET is not queued as a maskable interrupt */
+  c->irq_pending[vector_index] = 1;
+}
+
 /* Advances Timer0 by `cycles` CPU cycles. Models the common CTC mode
  * (WGM = 010): TCNT0 counts up through the prescaler; when it reaches OCR0A it
  * wraps to 0 and raises the OCF0A compare-match flag. Other modes count freely.
@@ -733,16 +745,34 @@ static void avr_timer0_tick(avr_t *c, uint32_t cycles) {
  * clears I and OCF0A, pushes the return address, and vectors to TIMER0_COMPA.
  * One interrupt is serviced per call (between instructions). */
 static void avr_service_interrupts(avr_t *c) {
-  if (c->timer0_compa_vec == 0) return;
-  if (!GETBIT(c->sreg, 7)) return; /* global interrupts disabled */
-  if (!GETBIT(c->io[IO_TIMSK0], BIT_OCF0A)) return;
-  if (!GETBIT(c->io[IO_TIFR0], BIT_OCF0A)) return;
+  /* Peripheral source model: queue TIMER0_COMPA when its mask+flag are high. */
+  if (c->timer0_compa_vec != 0 &&
+      GETBIT(c->io[IO_TIMSK0], BIT_OCF0A) &&
+      GETBIT(c->io[IO_TIFR0], BIT_OCF0A)) {
+    avr_raise_interrupt(c, c->timer0_compa_vec);
+  }
 
-  CLRBIT(c->sreg, 7);                 /* hardware clears I on entry (AVRe) */
-  CLRBIT(c->io[IO_TIFR0], BIT_OCF0A); /* flag cleared when its vector is taken */
-  push16(c, (uint16_t)c->pc);         /* return address (byte PC) */
-  c->pc = (uint32_t)c->timer0_compa_vec * 4u; /* 2 words/slot * 2 bytes/word */
+  if (!GETBIT(c->sreg, 7)) return; /* global interrupts disabled */
+
+  /* AVR priority: lowest vector index wins (RESET excluded). */
+  uint16_t vec = 0;
+  for (uint16_t i = 1; i < 256; i++) {
+    if (c->irq_pending[i]) {
+      vec = i;
+      break;
+    }
+  }
+  if (vec == 0) return;
+
+  c->irq_pending[vec] = 0;
+  CLRBIT(c->sreg, 7); /* hardware clears I on interrupt entry */
+  if (c->timer0_compa_vec != 0 && vec == c->timer0_compa_vec) {
+    CLRBIT(c->io[IO_TIFR0], BIT_OCF0A); /* clear served Timer0 compare flag */
+  }
+  push16(c, (uint16_t)c->pc); /* return address (byte PC) */
+  c->pc = (uint32_t)vec * vector_slot_bytes(c);
   c->cycles += 5;
+  TRACE(c, "IRQ vector %u -> PC=0x%06lX\n", (unsigned)vec, (unsigned long)c->pc);
 }
 
 void avr_step(avr_t *c) {
