@@ -138,6 +138,11 @@ static void eeprom_handle_eecr_write(avr_t *c, uint8_t old_eecr, uint8_t new_eec
 uint8_t avr_read_data(avr_t *c, uint32_t addr) {
   if (addr < AVR_REG_COUNT)
     return c->R[addr];
+  /* SREG and the stack pointer live in dedicated CPU fields, not io[]. Map their
+   * data-space addresses so IN/LDS observe the live values (e.g. IN R0,SREG). */
+  if (addr == 0x5F) return c->sreg;
+  if (addr == 0x5D) return (uint8_t)(c->sp & 0xFF);
+  if (addr == 0x5E) return (uint8_t)((c->sp >> 8) & 0xFF);
   if (addr < c->sram_start)
     return c->io[addr - 0x20];
   if (addr - c->sram_start < c->sram_bytes)
@@ -151,6 +156,11 @@ void avr_write_data(avr_t *c, uint32_t addr, uint8_t v) {
     c->R[addr] = v;
     return;
   }
+  /* SREG and the stack pointer are CPU fields, not io[]; route OUT/STS to them
+   * so e.g. OUT SREG,R0 in an ISR epilogue restores the real flags. */
+  if (addr == 0x5F) { c->sreg = v; return; }
+  if (addr == 0x5D) { c->sp = (uint16_t)((c->sp & 0xFF00) | v); return; }
+  if (addr == 0x5E) { c->sp = (uint16_t)((c->sp & 0x00FF) | ((uint16_t)v << 8)); return; }
   if (addr < c->sram_start) {
     uint32_t io_addr = addr - 0x20;
     if (c->eeprom_write_cycles_left > 0 && (io_addr == IO_EECR || io_addr == IO_EEARL || io_addr == IO_EEARH || io_addr == IO_EEDR)) {
@@ -394,6 +404,14 @@ int avr_init_device(avr_t *c, const char *device) {
       c->sram_start = d->sram_start;
       avr_alloc(c);
       c->sp = (uint16_t)d->ram_end; /* exact RAMEND from the device header */
+      /* TIMER0_COMPA vector index for devices whose modern Timer0 we model. */
+      if (strcmp(d->name, "atmega328p") == 0 || strcmp(d->name, "atmega328") == 0) {
+        c->timer0_compa_vec = 14;
+      } else if (strcmp(d->name, "atmega1284") == 0 || strcmp(d->name, "atmega1284p") == 0) {
+        c->timer0_compa_vec = 16;
+      } else {
+        c->timer0_compa_vec = 0; /* timer peripheral not modeled */
+      }
       return 0;
     }
   }
@@ -663,6 +681,66 @@ static int gate_opcode(avr_t *c, uint16_t op, uint32_t pc) {
  * ------------------------------------------------------------------------- */
 static void avr_step_internal(avr_t *c);
 
+/* Modern Timer0 (ATmega328P/1284) registers, as io[] offsets (data addr-0x20). */
+#define IO_TCCR0A 0x24
+#define IO_TCCR0B 0x25
+#define IO_TCNT0  0x26
+#define IO_OCR0A  0x27
+#define IO_TIFR0  0x15
+#define IO_TIMSK0 0x4E
+#define BIT_OCF0A  1 /* TIFR0 / TIMSK0 bit 1 (OCF0A / OCIE0A) */
+
+/* Advances Timer0 by `cycles` CPU cycles. Models the common CTC mode
+ * (WGM = 010): TCNT0 counts up through the prescaler; when it reaches OCR0A it
+ * wraps to 0 and raises the OCF0A compare-match flag. Other modes count freely.
+ * Devices without a modeled Timer0 (timer0_compa_vec == 0) are skipped. */
+static void avr_timer0_tick(avr_t *c, uint32_t cycles) {
+  if (c->timer0_compa_vec == 0) return;
+  uint8_t cs = c->io[IO_TCCR0B] & 0x07;
+  uint32_t presc;
+  switch (cs) {
+    case 1: presc = 1; break;
+    case 2: presc = 8; break;
+    case 3: presc = 64; break;
+    case 4: presc = 256; break;
+    case 5: presc = 1024; break;
+    default: return; /* stopped or external clock: do not advance */
+  }
+  int ctc = ((c->io[IO_TCCR0A] & 0x03) == 0x02); /* WGM01=1, WGM00=0 */
+  uint8_t ocr = c->io[IO_OCR0A];
+  c->timer0_acc += cycles;
+  while (c->timer0_acc >= presc) {
+    c->timer0_acc -= presc;
+    uint8_t t = c->io[IO_TCNT0];
+    if (ctc && t == ocr) {
+      c->io[IO_TCNT0] = 0;
+      SETBIT(c->io[IO_TIFR0], BIT_OCF0A);
+    } else {
+      c->io[IO_TCNT0] = (uint8_t)(t + 1);
+      if (!ctc && c->io[IO_TCNT0] == ocr) {
+        SETBIT(c->io[IO_TIFR0], BIT_OCF0A);
+      }
+    }
+  }
+}
+
+/* Delivers a pending Timer0 compare-match interrupt when enabled. Mirrors AVRe
+ * hardware: requires global I (SREG bit 7), OCIE0A and OCF0A set; on entry it
+ * clears I and OCF0A, pushes the return address, and vectors to TIMER0_COMPA.
+ * One interrupt is serviced per call (between instructions). */
+static void avr_service_interrupts(avr_t *c) {
+  if (c->timer0_compa_vec == 0) return;
+  if (!GETBIT(c->sreg, 7)) return; /* global interrupts disabled */
+  if (!GETBIT(c->io[IO_TIMSK0], BIT_OCF0A)) return;
+  if (!GETBIT(c->io[IO_TIFR0], BIT_OCF0A)) return;
+
+  CLRBIT(c->sreg, 7);                 /* hardware clears I on entry (AVRe) */
+  CLRBIT(c->io[IO_TIFR0], BIT_OCF0A); /* flag cleared when its vector is taken */
+  push16(c, (uint16_t)c->pc);         /* return address (byte PC) */
+  c->pc = (uint32_t)c->timer0_compa_vec * 4u; /* 2 words/slot * 2 bytes/word */
+  c->cycles += 5;
+}
+
 void avr_step(avr_t *c) {
   uint64_t start_cycles = c->cycles;
   avr_step_internal(c);
@@ -688,6 +766,9 @@ void avr_step(avr_t *c) {
       c->eeprom_write_cycles_left -= consumed;
     }
   }
+
+  avr_timer0_tick(c, (uint32_t)consumed);
+  avr_service_interrupts(c);
 }
 
 static void avr_step_internal(avr_t *c) {

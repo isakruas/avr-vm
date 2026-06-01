@@ -43,6 +43,8 @@ int main(int argc, char **argv) {
   uint64_t max_instr = 0;
   const char *mmcu = NULL;
   const char *hexfile = NULL;
+  long peek_addr = -1; /* data-space address to print at exit, or -1 */
+  int peek_len = 1;
 
   for (int i = 1; i < argc; i++) {
     if (strcmp(argv[i], "--list-mcus") == 0) {
@@ -56,6 +58,10 @@ int main(int argc, char **argv) {
       max_instr = (uint64_t)strtoull(argv[++i], NULL, 0);
     } else if (strncmp(argv[i], "-mmcu=", 6) == 0) {
       mmcu = argv[i] + 6;
+    } else if (strcmp(argv[i], "-m") == 0 && i + 1 < argc) {
+      peek_addr = (long)strtol(argv[++i], NULL, 0);
+    } else if (strcmp(argv[i], "-mlen") == 0 && i + 1 < argc) {
+      peek_len = (int)strtol(argv[++i], NULL, 0);
     } else if (argv[i][0] != '-' && hexfile == NULL) {
       hexfile = argv[i];
     } else {
@@ -97,6 +103,13 @@ int main(int argc, char **argv) {
 
   if (dump || cpu.unknown_opcode) {
     avr_dump_regs(&cpu);
+  }
+
+  if (peek_addr >= 0) {
+    for (int k = 0; k < peek_len; k++) {
+      uint32_t a = (uint32_t)peek_addr + k;
+      printf("MEM[0x%04lX] = 0x%02X\n", (unsigned long)a, avr_read_data(&cpu, a));
+    }
   }
 
   int rc = cpu.unknown_opcode ? 2 : 0;
