@@ -100,8 +100,41 @@ void avr_put_op(avr_t *c, uint32_t byte_addr, uint16_t op) {
   c->flash[byte_addr + 1] = (uint8_t)((op >> 8) & 0xFF);
 }
 
-static void eeprom_handle_eecr_write(avr_t *c, uint8_t old_eecr, uint8_t new_eecr) {
-  uint32_t eear = (uint32_t)c->io[IO_EEARL] | ((uint32_t)(c->io[IO_EEARH] & 0x0F) << 8);
+#include "eeprom_addrs.h"
+#include "spi_addrs.h"
+#include "twi_addrs.h"
+#include "uart_addrs.h"
+
+static const eeprom_hw_t* get_ee_hw(const char* name) {
+    for (size_t i = 0; i < sizeof(eeprom_hw_table)/sizeof(eeprom_hw_table[0]); i++) {
+        if (strcmp(eeprom_hw_table[i].name, name) == 0) return &eeprom_hw_table[i];
+    }
+    return NULL;
+}
+
+static const spi_hw_t* get_spi_hw(const char* name) {
+    for (size_t i = 0; i < sizeof(spi_hw_table)/sizeof(spi_hw_table[0]); i++) {
+        if (strcmp(spi_hw_table[i].name, name) == 0) return &spi_hw_table[i];
+    }
+    return NULL;
+}
+
+static const twi_hw_t* get_twi_hw(const char* name) {
+    for (size_t i = 0; i < sizeof(twi_hw_table)/sizeof(twi_hw_table[0]); i++) {
+        if (strcmp(twi_hw_table[i].name, name) == 0) return &twi_hw_table[i];
+    }
+    return NULL;
+}
+
+static const uart_hw_t* get_uart_hw(const char* name) {
+    for (size_t i = 0; i < sizeof(uart_hw_table)/sizeof(uart_hw_table[0]); i++) {
+        if (strcmp(uart_hw_table[i].name, name) == 0) return &uart_hw_table[i];
+    }
+    return NULL;
+}
+
+static void eeprom_handle_eecr_write(avr_t *c, uint8_t old_eecr, uint8_t new_eecr, const eeprom_hw_t* ee) {
+  uint32_t eear = (uint32_t)c->io[ee->addr_l] | ((uint32_t)(c->io[ee->addr_h] & 0x0F) << 8);
 
   // EEMPE (bit 2) write handling: set the hardware 4-cycle timer
   if (new_eecr & BIT(2)) {
@@ -113,9 +146,9 @@ static void eeprom_handle_eecr_write(avr_t *c, uint8_t old_eecr, uint8_t new_eec
   // EERE (bit 0) read handling
   if ((new_eecr & BIT(0)) && !(old_eecr & BIT(0))) {
     if (eear < c->eeprom_bytes) {
-      c->io[IO_EEDR] = c->eeprom[eear];
+      c->io[ee->data] = c->eeprom[eear];
     }
-    CLRBIT(c->io[IO_EECR], 0); // Clear EERE immediately
+    CLRBIT(c->io[ee->ctrl], 0); // Clear EERE immediately
   }
 
   // EEPE (bit 1) write handling: must be set while EEMPE timer is active
@@ -123,30 +156,64 @@ static void eeprom_handle_eecr_write(avr_t *c, uint8_t old_eecr, uint8_t new_eec
     if (c->eempe_timer > 0) {
       // Buffer the address and data, start programming cycle
       c->eeprom_write_addr = eear;
-      c->eeprom_write_val = c->io[IO_EEDR];
+      c->eeprom_write_val = c->io[ee->data];
       c->eeprom_write_cycles_left = 64; // 64 clock cycles delay
       
       c->eempe_timer = 0;
-      CLRBIT(c->io[IO_EECR], 2); // Clear EEMPE immediately
+      CLRBIT(c->io[ee->ctrl], 2); // Clear EEMPE immediately
     } else {
       // If EEMPE is not active, EEPE write has no effect
-      CLRBIT(c->io[IO_EECR], 1);
+      CLRBIT(c->io[ee->ctrl], 1);
     }
   }
+}
+
+static void eeprom_handle_modern_write(avr_t *c, uint8_t new_ctrl, const eeprom_hw_t* ee) {
+    uint32_t eear = (uint32_t)c->io[ee->addr_l] | ((uint32_t)(c->io[ee->addr_h] & 0x0F) << 8);
+    // In Modern AVRs, CMD 0x04 is Erase&Write.
+    if (new_ctrl == 0x04) {
+      c->eeprom_write_addr = eear;
+      c->eeprom_write_val = c->io[ee->data];
+      c->eeprom_write_cycles_left = 64;
+      c->io[ee->status] |= 0x01; // Set EEBUSY
+    }
 }
 
 uint8_t avr_read_data(avr_t *c, uint32_t addr) {
   if (addr < AVR_REG_COUNT)
     return c->R[addr];
-  /* SREG and the stack pointer live in dedicated CPU fields, not io[]. Map their
-   * data-space addresses so IN/LDS observe the live values (e.g. IN R0,SREG). */
   if (c->core != AVR_CORE_RC) {
     if (addr == 0x5F) return c->sreg;
     if (addr == 0x5D) return (uint8_t)(c->sp & 0xFF);
     if (addr == 0x5E) return (uint8_t)((c->sp >> 8) & 0xFF);
   }
-  if (addr < c->sram_start)
-    return c->io[addr - 0x20];
+  if (addr < c->sram_start) {
+    uint32_t io_addr = addr - 0x20;
+    
+    // Support Modern AVR EEPROM reading
+    const eeprom_hw_t* ee = get_ee_hw(c->device);
+    if (ee && ee->is_modern && io_addr == ee->data) {
+       uint32_t eear = (uint32_t)c->io[ee->addr_l] | ((uint32_t)(c->io[ee->addr_h] & 0x0F) << 8);
+       if (eear < c->eeprom_bytes) return c->eeprom[eear];
+    }
+
+    const spi_hw_t* spi = get_spi_hw(c->device);
+    if (spi && io_addr == spi->status) {
+       return c->io[io_addr] | 0x80; // SPIF
+    }
+
+    const twi_hw_t* twi = get_twi_hw(c->device);
+    if (twi && io_addr == twi->ctrl) {
+       return c->io[io_addr] | 0x80; // TWINT
+    }
+
+    const uart_hw_t* uart = get_uart_hw(c->device);
+    if (uart && io_addr == uart->status) {
+       return c->io[io_addr] | 0x60; // UDRE | TXC
+    }
+
+    return c->io[io_addr];
+  }
   if (addr - c->sram_start < c->sram_bytes)
     return c->sram[addr - c->sram_start];
   fprintf(stderr, "Data read OOB 0x%06lX\n", (unsigned long)addr);
@@ -158,8 +225,6 @@ void avr_write_data(avr_t *c, uint32_t addr, uint8_t v) {
     c->R[addr] = v;
     return;
   }
-  /* SREG and the stack pointer are CPU fields, not io[]; route OUT/STS to them
-   * so e.g. OUT SREG,R0 in an ISR epilogue restores the real flags. */
   if (c->core != AVR_CORE_RC) {
     if (addr == 0x5F) { c->sreg = v; return; }
     if (addr == 0x5D) { c->sp = (uint16_t)((c->sp & 0xFF00) | v); return; }
@@ -167,14 +232,24 @@ void avr_write_data(avr_t *c, uint32_t addr, uint8_t v) {
   }
   if (addr < c->sram_start) {
     uint32_t io_addr = addr - 0x20;
-    if (c->eeprom_write_cycles_left > 0 && (io_addr == IO_EECR || io_addr == IO_EEARL || io_addr == IO_EEARH || io_addr == IO_EEDR)) {
-      // Ignore writes to EEPROM registers during active programming cycle
-      return;
+    const eeprom_hw_t* ee = get_ee_hw(c->device);
+    
+    if (ee) {
+        if (c->eeprom_write_cycles_left > 0 && 
+            (io_addr == ee->ctrl || io_addr == ee->addr_l || io_addr == ee->addr_h || io_addr == ee->data)) {
+          return;
+        }
     }
+    
     uint8_t old = c->io[io_addr];
     c->io[io_addr] = v;
-    if (io_addr == IO_EECR) {
-      eeprom_handle_eecr_write(c, old, v);
+    
+    if (ee) {
+        if (ee->is_modern == 0 && io_addr == ee->ctrl) {
+            eeprom_handle_eecr_write(c, old, v, ee);
+        } else if (ee->is_modern == 1 && io_addr == ee->ctrl) {
+            eeprom_handle_modern_write(c, v, ee);
+        }
     }
     return;
   }
@@ -780,10 +855,13 @@ void avr_step(avr_t *c) {
   avr_step_internal(c);
   uint64_t consumed = c->cycles - start_cycles;
   
+  const eeprom_hw_t* ee = get_ee_hw(c->device);
+  uint32_t ctrl_reg = ee ? ee->ctrl : 0x1F;
+
   if (c->eempe_timer > 0) {
     if (consumed >= c->eempe_timer) {
       c->eempe_timer = 0;
-      CLRBIT(c->io[IO_EECR], 2); // EEMPE
+      if (!ee || ee->is_modern == 0) CLRBIT(c->io[ctrl_reg], 2); // EEMPE
     } else {
       c->eempe_timer -= consumed;
     }
@@ -795,7 +873,12 @@ void avr_step(avr_t *c) {
       if (c->eeprom_write_addr < c->eeprom_bytes) {
         c->eeprom[c->eeprom_write_addr] = c->eeprom_write_val;
       }
-      CLRBIT(c->io[IO_EECR], 1); // Clear EEPE (write complete)
+      if (!ee || ee->is_modern == 0) {
+        CLRBIT(c->io[ctrl_reg], 1); // Clear EEPE (write complete)
+      } else {
+        c->io[ee->status] &= ~0x01; // Clear EEBUSY
+        c->io[ee->ctrl] &= ~0x07;   // Clear CMD
+      }
     } else {
       c->eeprom_write_cycles_left -= consumed;
     }
