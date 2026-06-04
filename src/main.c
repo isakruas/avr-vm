@@ -35,7 +35,8 @@ static void usage(const char *prog) {
   printf("  -n MAX       stop after MAX instructions (default: unlimited)\n");
   printf("  -d           dump registers at exit\n");
   printf("  --irq=VEC            queue one interrupt vector (repeatable)\n");
-  printf("  --irq-at=VEC:STEP    queue vector when executed-instr count reaches STEP\n");
+  printf("  --irq-at=VEC:STEP    queue vector when executed-instr count "
+         "reaches STEP\n");
   printf("  --irq-every=VEC:N    queue vector every N executed instructions\n");
   printf("  --list-mcus  list known devices and exit\n");
 }
@@ -55,7 +56,8 @@ typedef struct {
 static int parse_u64(const char *s, uint64_t *out) {
   char *end = NULL;
   unsigned long long v = strtoull(s, &end, 0);
-  if (!s[0] || (end && *end != '\0')) return 0;
+  if (!s[0] || (end && *end != '\0'))
+    return 0;
   *out = (uint64_t)v;
   return 1;
 }
@@ -94,7 +96,8 @@ int main(int argc, char **argv) {
     } else if (strncmp(argv[i], "--irq=", 6) == 0) {
       uint64_t vec = 0;
       if (!parse_u64(argv[i] + 6, &vec) || vec == 0 || vec > 255) {
-        fprintf(stderr, "Invalid --irq vector '%s' (expected 1..255)\n", argv[i] + 6);
+        fprintf(stderr, "Invalid --irq vector '%s' (expected 1..255)\n",
+                argv[i] + 6);
         return 1;
       }
       if (startup_irq_count >= 256) {
@@ -107,7 +110,8 @@ int main(int argc, char **argv) {
       const char *sep = strchr(arg, ':');
       uint64_t vec = 0, step = 0;
       if (!sep) {
-        fprintf(stderr, "Invalid --irq-at format '%s' (expected VEC:STEP)\n", arg);
+        fprintf(stderr, "Invalid --irq-at format '%s' (expected VEC:STEP)\n",
+                arg);
         return 1;
       }
       char left[32];
@@ -118,8 +122,10 @@ int main(int argc, char **argv) {
       }
       memcpy(left, arg, n);
       left[n] = '\0';
-      if (!parse_u64(left, &vec) || vec == 0 || vec > 255 || !parse_u64(sep + 1, &step)) {
-        fprintf(stderr, "Invalid --irq-at '%s' (expected VEC:STEP, VEC=1..255)\n", arg);
+      if (!parse_u64(left, &vec) || vec == 0 || vec > 255 ||
+          !parse_u64(sep + 1, &step)) {
+        fprintf(stderr,
+                "Invalid --irq-at '%s' (expected VEC:STEP, VEC=1..255)\n", arg);
         return 1;
       }
       if (irq_at_count >= 256) {
@@ -132,7 +138,8 @@ int main(int argc, char **argv) {
       const char *sep = strchr(arg, ':');
       uint64_t vec = 0, period = 0;
       if (!sep) {
-        fprintf(stderr, "Invalid --irq-every format '%s' (expected VEC:N)\n", arg);
+        fprintf(stderr, "Invalid --irq-every format '%s' (expected VEC:N)\n",
+                arg);
         return 1;
       }
       char left[32];
@@ -143,15 +150,19 @@ int main(int argc, char **argv) {
       }
       memcpy(left, arg, n);
       left[n] = '\0';
-      if (!parse_u64(left, &vec) || vec == 0 || vec > 255 || !parse_u64(sep + 1, &period) || period == 0) {
-        fprintf(stderr, "Invalid --irq-every '%s' (expected VEC:N, VEC=1..255, N>0)\n", arg);
+      if (!parse_u64(left, &vec) || vec == 0 || vec > 255 ||
+          !parse_u64(sep + 1, &period) || period == 0) {
+        fprintf(stderr,
+                "Invalid --irq-every '%s' (expected VEC:N, VEC=1..255, N>0)\n",
+                arg);
         return 1;
       }
       if (irq_every_count >= 256) {
         fprintf(stderr, "Too many --irq-every options (max 256)\n");
         return 1;
       }
-      irq_every_events[irq_every_count++] = (irq_every_event_t){(uint8_t)vec, period, period};
+      irq_every_events[irq_every_count++] =
+          (irq_every_event_t){(uint8_t)vec, period, period};
     } else if (argv[i][0] != '-' && hexfile == NULL) {
       hexfile = argv[i];
     } else {
@@ -214,7 +225,8 @@ int main(int argc, char **argv) {
   if (peek_addr >= 0) {
     for (int k = 0; k < peek_len; k++) {
       uint32_t a = (uint32_t)peek_addr + k;
-      printf("MEM[0x%04lX] = 0x%02X\n", (unsigned long)a, avr_read_data(&cpu, a));
+      printf("MEM[0x%04lX] = 0x%02X\n", (unsigned long)a,
+             avr_read_data(&cpu, a));
     }
   }
 

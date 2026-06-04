@@ -100,41 +100,44 @@ void avr_put_op(avr_t *c, uint32_t byte_addr, uint16_t op) {
   c->flash[byte_addr + 1] = (uint8_t)((op >> 8) & 0xFF);
 }
 
-#include "eeprom_addrs.h"
-#include "spi_addrs.h"
-#include "twi_addrs.h"
-#include "uart_addrs.h"
-
-static const eeprom_hw_t* get_ee_hw(const char* name) {
-    for (size_t i = 0; i < sizeof(eeprom_hw_table)/sizeof(eeprom_hw_table[0]); i++) {
-        if (strcmp(eeprom_hw_table[i].name, name) == 0) return &eeprom_hw_table[i];
-    }
-    return NULL;
+static const eeprom_hw_t *get_ee_hw(const char *name) {
+  for (size_t i = 0; i < sizeof(eeprom_hw_table) / sizeof(eeprom_hw_table[0]);
+       i++) {
+    if (strcmp(eeprom_hw_table[i].name, name) == 0)
+      return &eeprom_hw_table[i];
+  }
+  return NULL;
 }
 
-static const spi_hw_t* get_spi_hw(const char* name) {
-    for (size_t i = 0; i < sizeof(spi_hw_table)/sizeof(spi_hw_table[0]); i++) {
-        if (strcmp(spi_hw_table[i].name, name) == 0) return &spi_hw_table[i];
-    }
-    return NULL;
+static const spi_hw_t *get_spi_hw(const char *name) {
+  for (size_t i = 0; i < sizeof(spi_hw_table) / sizeof(spi_hw_table[0]); i++) {
+    if (strcmp(spi_hw_table[i].name, name) == 0)
+      return &spi_hw_table[i];
+  }
+  return NULL;
 }
 
-static const twi_hw_t* get_twi_hw(const char* name) {
-    for (size_t i = 0; i < sizeof(twi_hw_table)/sizeof(twi_hw_table[0]); i++) {
-        if (strcmp(twi_hw_table[i].name, name) == 0) return &twi_hw_table[i];
-    }
-    return NULL;
+static const twi_hw_t *get_twi_hw(const char *name) {
+  for (size_t i = 0; i < sizeof(twi_hw_table) / sizeof(twi_hw_table[0]); i++) {
+    if (strcmp(twi_hw_table[i].name, name) == 0)
+      return &twi_hw_table[i];
+  }
+  return NULL;
 }
 
-static const uart_hw_t* get_uart_hw(const char* name) {
-    for (size_t i = 0; i < sizeof(uart_hw_table)/sizeof(uart_hw_table[0]); i++) {
-        if (strcmp(uart_hw_table[i].name, name) == 0) return &uart_hw_table[i];
-    }
-    return NULL;
+static const uart_hw_t *get_uart_hw(const char *name) {
+  for (size_t i = 0; i < sizeof(uart_hw_table) / sizeof(uart_hw_table[0]);
+       i++) {
+    if (strcmp(uart_hw_table[i].name, name) == 0)
+      return &uart_hw_table[i];
+  }
+  return NULL;
 }
 
-static void eeprom_handle_eecr_write(avr_t *c, uint8_t old_eecr, uint8_t new_eecr, const eeprom_hw_t* ee) {
-  uint32_t eear = (uint32_t)c->io[ee->addr_l] | ((uint32_t)(c->io[ee->addr_h] & 0x0F) << 8);
+static void eeprom_handle_eecr_write(avr_t *c, uint8_t old_eecr,
+                                     uint8_t new_eecr, const eeprom_hw_t *ee) {
+  uint32_t eear =
+      (uint32_t)c->io[ee->addr_l] | ((uint32_t)(c->io[ee->addr_h] & 0x0F) << 8);
 
   // EEMPE (bit 2) write handling: set the hardware 4-cycle timer
   if (new_eecr & BIT(2)) {
@@ -158,7 +161,7 @@ static void eeprom_handle_eecr_write(avr_t *c, uint8_t old_eecr, uint8_t new_eec
       c->eeprom_write_addr = eear;
       c->eeprom_write_val = c->io[ee->data];
       c->eeprom_write_cycles_left = 64; // 64 clock cycles delay
-      
+
       c->eempe_timer = 0;
       CLRBIT(c->io[ee->ctrl], 2); // Clear EEMPE immediately
     } else {
@@ -168,48 +171,55 @@ static void eeprom_handle_eecr_write(avr_t *c, uint8_t old_eecr, uint8_t new_eec
   }
 }
 
-static void eeprom_handle_modern_write(avr_t *c, uint8_t new_ctrl, const eeprom_hw_t* ee) {
-    uint32_t eear = (uint32_t)c->io[ee->addr_l] | ((uint32_t)(c->io[ee->addr_h] & 0x0F) << 8);
-    // In Modern AVRs, CMD 0x04 is Erase&Write.
-    if (new_ctrl == 0x04) {
-      c->eeprom_write_addr = eear;
-      c->eeprom_write_val = c->io[ee->data];
-      c->eeprom_write_cycles_left = 64;
-      c->io[ee->status] |= 0x01; // Set EEBUSY
-    }
+static void eeprom_handle_modern_write(avr_t *c, uint8_t new_ctrl,
+                                       const eeprom_hw_t *ee) {
+  uint32_t eear =
+      (uint32_t)c->io[ee->addr_l] | ((uint32_t)(c->io[ee->addr_h] & 0x0F) << 8);
+  // In Modern AVRs, CMD 0x04 is Erase&Write.
+  if (new_ctrl == 0x04) {
+    c->eeprom_write_addr = eear;
+    c->eeprom_write_val = c->io[ee->data];
+    c->eeprom_write_cycles_left = 64;
+    c->io[ee->status] |= 0x01; // Set EEBUSY
+  }
 }
 
 uint8_t avr_read_data(avr_t *c, uint32_t addr) {
   if (addr < AVR_REG_COUNT)
     return c->R[addr];
   if (c->core != AVR_CORE_RC) {
-    if (addr == 0x5F) return c->sreg;
-    if (addr == 0x5D) return (uint8_t)(c->sp & 0xFF);
-    if (addr == 0x5E) return (uint8_t)((c->sp >> 8) & 0xFF);
+    if (addr == 0x5F)
+      return c->sreg;
+    if (addr == 0x5D)
+      return (uint8_t)(c->sp & 0xFF);
+    if (addr == 0x5E)
+      return (uint8_t)((c->sp >> 8) & 0xFF);
   }
   if (addr < c->sram_start) {
     uint32_t io_addr = addr - 0x20;
-    
+
     // Support Modern AVR EEPROM reading
-    const eeprom_hw_t* ee = get_ee_hw(c->device);
+    const eeprom_hw_t *ee = get_ee_hw(c->device);
     if (ee && ee->is_modern && io_addr == ee->data) {
-       uint32_t eear = (uint32_t)c->io[ee->addr_l] | ((uint32_t)(c->io[ee->addr_h] & 0x0F) << 8);
-       if (eear < c->eeprom_bytes) return c->eeprom[eear];
+      uint32_t eear = (uint32_t)c->io[ee->addr_l] |
+                      ((uint32_t)(c->io[ee->addr_h] & 0x0F) << 8);
+      if (eear < c->eeprom_bytes)
+        return c->eeprom[eear];
     }
 
-    const spi_hw_t* spi = get_spi_hw(c->device);
+    const spi_hw_t *spi = get_spi_hw(c->device);
     if (spi && io_addr == spi->status) {
-       return c->io[io_addr] | 0x80; // SPIF
+      return c->io[io_addr] | 0x80; // SPIF
     }
 
-    const twi_hw_t* twi = get_twi_hw(c->device);
+    const twi_hw_t *twi = get_twi_hw(c->device);
     if (twi && io_addr == twi->ctrl) {
-       return c->io[io_addr] | 0x80; // TWINT
+      return c->io[io_addr] | 0x80; // TWINT
     }
 
-    const uart_hw_t* uart = get_uart_hw(c->device);
+    const uart_hw_t *uart = get_uart_hw(c->device);
     if (uart && io_addr == uart->status) {
-       return c->io[io_addr] | 0x60; // UDRE | TXC
+      return c->io[io_addr] | 0x60; // UDRE | TXC
     }
 
     return c->io[io_addr];
@@ -226,30 +236,40 @@ void avr_write_data(avr_t *c, uint32_t addr, uint8_t v) {
     return;
   }
   if (c->core != AVR_CORE_RC) {
-    if (addr == 0x5F) { c->sreg = v; return; }
-    if (addr == 0x5D) { c->sp = (uint16_t)((c->sp & 0xFF00) | v); return; }
-    if (addr == 0x5E) { c->sp = (uint16_t)((c->sp & 0x00FF) | ((uint16_t)v << 8)); return; }
+    if (addr == 0x5F) {
+      c->sreg = v;
+      return;
+    }
+    if (addr == 0x5D) {
+      c->sp = (uint16_t)((c->sp & 0xFF00) | v);
+      return;
+    }
+    if (addr == 0x5E) {
+      c->sp = (uint16_t)((c->sp & 0x00FF) | ((uint16_t)v << 8));
+      return;
+    }
   }
   if (addr < c->sram_start) {
     uint32_t io_addr = addr - 0x20;
-    const eeprom_hw_t* ee = get_ee_hw(c->device);
-    
+    const eeprom_hw_t *ee = get_ee_hw(c->device);
+
     if (ee) {
-        if (c->eeprom_write_cycles_left > 0 && 
-            (io_addr == ee->ctrl || io_addr == ee->addr_l || io_addr == ee->addr_h || io_addr == ee->data)) {
-          return;
-        }
+      if (c->eeprom_write_cycles_left > 0 &&
+          (io_addr == ee->ctrl || io_addr == ee->addr_l ||
+           io_addr == ee->addr_h || io_addr == ee->data)) {
+        return;
+      }
     }
-    
+
     uint8_t old = c->io[io_addr];
     c->io[io_addr] = v;
-    
+
     if (ee) {
-        if (ee->is_modern == 0 && io_addr == ee->ctrl) {
-            eeprom_handle_eecr_write(c, old, v, ee);
-        } else if (ee->is_modern == 1 && io_addr == ee->ctrl) {
-            eeprom_handle_modern_write(c, v, ee);
-        }
+      if (ee->is_modern == 0 && io_addr == ee->ctrl) {
+        eeprom_handle_eecr_write(c, old, v, ee);
+      } else if (ee->is_modern == 1 && io_addr == ee->ctrl) {
+        eeprom_handle_modern_write(c, v, ee);
+      }
     }
     return;
   }
@@ -484,9 +504,11 @@ int avr_init_device(avr_t *c, const char *device) {
       avr_alloc(c);
       c->sp = (uint16_t)d->ram_end; /* exact RAMEND from the device header */
       /* TIMER0_COMPA vector index for devices whose modern Timer0 we model. */
-      if (strcmp(d->name, "atmega328p") == 0 || strcmp(d->name, "atmega328") == 0) {
+      if (strcmp(d->name, "atmega328p") == 0 ||
+          strcmp(d->name, "atmega328") == 0) {
         c->timer0_compa_vec = 14;
-      } else if (strcmp(d->name, "atmega1284") == 0 || strcmp(d->name, "atmega1284p") == 0) {
+      } else if (strcmp(d->name, "atmega1284") == 0 ||
+                 strcmp(d->name, "atmega1284p") == 0) {
         c->timer0_compa_vec = 16;
       } else {
         c->timer0_compa_vec = 0; /* timer peripheral not modeled */
@@ -760,14 +782,15 @@ static int gate_opcode(avr_t *c, uint16_t op, uint32_t pc) {
  * ------------------------------------------------------------------------- */
 static void avr_step_internal(avr_t *c);
 
-/* Modern Timer0 (ATmega328P/1284) registers, as io[] offsets (data addr-0x20). */
+/* Modern Timer0 (ATmega328P/1284) registers, as io[] offsets (data addr-0x20).
+ */
 #define IO_TCCR0A 0x24
 #define IO_TCCR0B 0x25
-#define IO_TCNT0  0x26
-#define IO_OCR0A  0x27
-#define IO_TIFR0  0x15
+#define IO_TCNT0 0x26
+#define IO_OCR0A 0x27
+#define IO_TIFR0 0x15
 #define IO_TIMSK0 0x4E
-#define BIT_OCF0A  1 /* TIFR0 / TIMSK0 bit 1 (OCF0A / OCIE0A) */
+#define BIT_OCF0A 1 /* TIFR0 / TIMSK0 bit 1 (OCF0A / OCIE0A) */
 
 /* Vector slot width mirrors ik8b codegen:
  * - AVRrc uses 1-word RJMP slots  (2 bytes)
@@ -777,7 +800,8 @@ static uint32_t vector_slot_bytes(const avr_t *c) {
 }
 
 void avr_raise_interrupt(avr_t *c, uint8_t vector_index) {
-  if (vector_index == 0) return; /* RESET is not queued as a maskable interrupt */
+  if (vector_index == 0)
+    return; /* RESET is not queued as a maskable interrupt */
   c->irq_pending[vector_index] = 1;
 }
 
@@ -786,16 +810,28 @@ void avr_raise_interrupt(avr_t *c, uint8_t vector_index) {
  * wraps to 0 and raises the OCF0A compare-match flag. Other modes count freely.
  * Devices without a modeled Timer0 (timer0_compa_vec == 0) are skipped. */
 static void avr_timer0_tick(avr_t *c, uint32_t cycles) {
-  if (c->timer0_compa_vec == 0) return;
+  if (c->timer0_compa_vec == 0)
+    return;
   uint8_t cs = c->io[IO_TCCR0B] & 0x07;
   uint32_t presc;
   switch (cs) {
-    case 1: presc = 1; break;
-    case 2: presc = 8; break;
-    case 3: presc = 64; break;
-    case 4: presc = 256; break;
-    case 5: presc = 1024; break;
-    default: return; /* stopped or external clock: do not advance */
+  case 1:
+    presc = 1;
+    break;
+  case 2:
+    presc = 8;
+    break;
+  case 3:
+    presc = 64;
+    break;
+  case 4:
+    presc = 256;
+    break;
+  case 5:
+    presc = 1024;
+    break;
+  default:
+    return; /* stopped or external clock: do not advance */
   }
   int ctc = ((c->io[IO_TCCR0A] & 0x03) == 0x02); /* WGM01=1, WGM00=0 */
   uint8_t ocr = c->io[IO_OCR0A];
@@ -821,13 +857,13 @@ static void avr_timer0_tick(avr_t *c, uint32_t cycles) {
  * One interrupt is serviced per call (between instructions). */
 static void avr_service_interrupts(avr_t *c) {
   /* Peripheral source model: queue TIMER0_COMPA when its mask+flag are high. */
-  if (c->timer0_compa_vec != 0 &&
-      GETBIT(c->io[IO_TIMSK0], BIT_OCF0A) &&
+  if (c->timer0_compa_vec != 0 && GETBIT(c->io[IO_TIMSK0], BIT_OCF0A) &&
       GETBIT(c->io[IO_TIFR0], BIT_OCF0A)) {
     avr_raise_interrupt(c, c->timer0_compa_vec);
   }
 
-  if (!GETBIT(c->sreg, 7)) return; /* global interrupts disabled */
+  if (!GETBIT(c->sreg, 7))
+    return; /* global interrupts disabled */
 
   /* AVR priority: lowest vector index wins (RESET excluded). */
   uint16_t vec = 0;
@@ -837,7 +873,8 @@ static void avr_service_interrupts(avr_t *c) {
       break;
     }
   }
-  if (vec == 0) return;
+  if (vec == 0)
+    return;
 
   c->irq_pending[vec] = 0;
   CLRBIT(c->sreg, 7); /* hardware clears I on interrupt entry */
@@ -847,21 +884,23 @@ static void avr_service_interrupts(avr_t *c) {
   push16(c, (uint16_t)c->pc); /* return address (byte PC) */
   c->pc = (uint32_t)vec * vector_slot_bytes(c);
   c->cycles += 5;
-  TRACE(c, "IRQ vector %u -> PC=0x%06lX\n", (unsigned)vec, (unsigned long)c->pc);
+  TRACE(c, "IRQ vector %u -> PC=0x%06lX\n", (unsigned)vec,
+        (unsigned long)c->pc);
 }
 
 void avr_step(avr_t *c) {
   uint64_t start_cycles = c->cycles;
   avr_step_internal(c);
   uint64_t consumed = c->cycles - start_cycles;
-  
-  const eeprom_hw_t* ee = get_ee_hw(c->device);
+
+  const eeprom_hw_t *ee = get_ee_hw(c->device);
   uint32_t ctrl_reg = ee ? ee->ctrl : 0x1F;
 
   if (c->eempe_timer > 0) {
     if (consumed >= c->eempe_timer) {
       c->eempe_timer = 0;
-      if (!ee || ee->is_modern == 0) CLRBIT(c->io[ctrl_reg], 2); // EEMPE
+      if (!ee || ee->is_modern == 0)
+        CLRBIT(c->io[ctrl_reg], 2); // EEMPE
     } else {
       c->eempe_timer -= consumed;
     }

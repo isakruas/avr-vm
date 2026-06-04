@@ -88,9 +88,10 @@ typedef struct {
   uint32_t eeprom_write_cycles_left;
   uint32_t eeprom_write_addr;
   uint8_t eeprom_write_val;
-  uint32_t timer0_acc;       /* Timer0 prescaler cycle accumulator */
-  uint8_t timer0_compa_vec;  /* TIMER0_COMPA vector index for this device (0 = unsupported) */
-  uint8_t irq_pending[256];  /* pending interrupt vectors by index (0..255) */
+  uint32_t timer0_acc;      /* Timer0 prescaler cycle accumulator */
+  uint8_t timer0_compa_vec; /* TIMER0_COMPA vector index for this device (0 =
+                               unsupported) */
+  uint8_t irq_pending[256]; /* pending interrupt vectors by index (0..255) */
 } avr_t;
 
 /* Lifecycle: allocate memories, zero state, free buffers. avr_init applies the
